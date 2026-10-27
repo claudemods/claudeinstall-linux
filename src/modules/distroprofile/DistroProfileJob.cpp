@@ -26,6 +26,8 @@
 #include <QThread>
 #include <QUrl>
 
+#include <utility>
+
 using ClaudeInstall::JobResult;
 using RunLocation = ClaudeInstall::System::RunLocation;
 
@@ -296,14 +298,14 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
 {
     const QString type = ClaudeInstall::getString( step, "type" );
     const bool optional = ClaudeInstall::getBool( step, "optional", false );
-    auto soften = [ & ]( JobResult r )
+    auto soften = [ & ]( JobResult r ) -> JobResult
     {
         if ( !r && optional )
         {
             cWarning() << "Optional step" << type << "failed, continuing:" << r.message();
             return JobResult::ok();
         }
-        return r;
+        return std::move( r );
     };
 
     if ( type == QLatin1String( "copy" ) )
@@ -351,7 +353,7 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
             const auto r = inTarget( cmd );
             if ( r.getExitCode() != 0 )
             {
-                const auto res = soften( failed( cmd, r ) );
+                auto res = soften( failed( cmd, r ) );
                 if ( !res )
                 {
                     return res;
@@ -436,7 +438,7 @@ DistroProfileJob::runSteps( const QVariantList& steps, const Context& ctx )
     int done = 0;
     for ( const QVariant& s : steps )
     {
-        const auto r = runStep( s.toMap(), ctx );
+        auto r = runStep( s.toMap(), ctx );
         if ( !r )
         {
             return r;
