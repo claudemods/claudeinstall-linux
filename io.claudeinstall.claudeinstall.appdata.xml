@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: no
+     SPDX-License-Identifier: CC0-1.0
+-->
+<component type="desktop">
+  <id>io.claudeinstall.claudeinstall.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>ClaudeInstall</name>
+  <name xml:lang="da">ClaudeInstall</name>
+  <name xml:lang="en-GB">ClaudeInstall</name>
+  <name xml:lang="nl">ClaudeInstall</name>
+  <summary>ClaudeInstall Linux Installer</summary>
+  <summary xml:lang="en-GB">ClaudeInstall Linux Installer</summary>
+  <summary xml:lang="nl">Linux Installatieprogramma ClaudeInstall</summary>
+  <description>
+    <p>ClaudeInstall is an installer program for Linux distributions.</p>
+    <p xml:lang="nl">ClaudeInstall is een installatieprogramma voor Linux distributies.</p>
+  </description>
+  <url type="homepage">https://claudeinstall.io</url>
+  <url type="bugtracker">https://https://github.com/claudeinstall/claudeinstall/issues/</url>
+  <url type="help">https://github.com/claudeinstall/claudeinstall/wiki</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>ClaudeInstall Welcome</caption>
+      <image>https://claudeinstall.io/images/cal_640.png</image>
+    </screenshot>
+  </screenshots>
+  <provides>
+    <binary>claudeinstall</binary>
+  </provides>
+</component>

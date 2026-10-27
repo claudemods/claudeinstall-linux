@@ -1,0 +1,116 @@
+#   SPDX-FileCopyrightText: 2014 Teo Mrnjavac <teo@kde.org>
+#   SPDX-FileCopyrightText: 2020 Adriaan de Groot <groot@kde.org>
+#   SPDX-License-Identifier: BSD-2-Clause
+#
+# Note that ClaudeInstall itself is GPL-3.0-or-later: the above license
+# applies to **this** CMake file.
+#
+# Config file for the ClaudeInstall package
+#
+# The following IMPORTED targets are defined:
+#   - ClaudeInstall::claudeinstall      - the core library
+#   - ClaudeInstall::claudeinstallstep  - the frontend-neutral wizard library
+#   - ClaudeInstall::claudeinstallui    - the UI (and QML) library (only if built with GUI)
+#   (The text-mode library is not exported: text-mode pages are built in the ClaudeInstall tree.)
+#
+# For legacy use it defines the following variables:
+#   - ClaudeInstall_INCLUDE_DIRS    - include directories for ClaudeInstall
+#   - ClaudeInstall_LIB_DIRS        - library directories
+#   - ClaudeInstall_LIBRARIES       - libraries to link against
+
+@PACKAGE_INIT@
+
+### Versioning and IMPORTED targets
+#
+#
+include(${CMAKE_CURRENT_LIST_DIR}/ClaudeInstallConfigVersion.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/ClaudeInstallTargets.cmake)
+set(ClaudeInstall_WITH_GUI @WITH_GUI@)
+set(ClaudeInstall_WITH_TUI @WITH_TUI@)
+if (NOT TARGET ClaudeInstall::claudeinstall OR NOT TARGET ClaudeInstall::claudeinstallstep)
+    message(FATAL_ERROR "ClaudeInstall found with missing CMake targets")
+endif()
+if (ClaudeInstall_WITH_GUI AND NOT TARGET ClaudeInstall::claudeinstallui)
+    message(FATAL_ERROR "ClaudeInstall found with missing CMake targets (GUI)")
+endif()
+
+# Need various CMake files that are installed alongside this one.
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR})
+
+### Dependencies
+#
+# The libraries can depend on a variety of Qt and KDE Frameworks
+# components, so accumulate them and find (just once).
+#
+macro(accumulate_deps outvar target namespace)
+    string(LENGTH ${namespace} _nslen)
+    get_target_property(_libs ${target} INTERFACE_LINK_LIBRARIES)
+    foreach(_lib ${_libs})
+        if (_lib MATCHES ^${namespace})
+            string(SUBSTRING ${_lib} ${_nslen} -1 _component)
+            list(APPEND ${outvar} ${_component})
+        endif()
+    endforeach()
+endmacro()
+
+set(ClaudeInstall_WITH_QT6 @WITH_QT6@)
+if(ClaudeInstall_WITH_QT6)
+    set(qtname "Qt6")
+    set(kfname "kf6")
+    message(STATUS "ClaudeInstall was built with Qt6 and KDE Frameworks 6")
+else()
+    set(qtname "Qt5")
+    set(kfname "kf5")
+    message(STATUS "ClaudeInstall was built with Qt5 and KDE Frameworks 5 (legacy)")
+endif()
+
+# Qt infrastructure for translations is required
+set(qt_required Core LinguistTools)
+if(ClaudeInstall_WITH_GUI)
+    list(APPEND qt_required Widgets)
+endif()
+accumulate_deps(qt_required ClaudeInstall::claudeinstall ${qtname}::)
+if(ClaudeInstall_WITH_GUI)
+    accumulate_deps(qt_required ClaudeInstall::claudeinstallui ${qtname}::)
+endif()
+find_package(${qtname} CONFIG REQUIRED ${qt_required})
+
+set(kf_required "")
+accumulate_deps(kf_required ClaudeInstall::claudeinstall ${kfname}::)
+if(ClaudeInstall_WITH_GUI)
+    accumulate_deps(kf_required ClaudeInstall::claudeinstallui ${kfname}::)
+endif()
+if(kf_required)
+    find_package(ECM ${ECM_VERSION} NO_MODULE)
+    if( ECM_FOUND )
+        list(INSERT CMAKE_MODULE_PATH 0 ${ECM_MODULE_PATH})
+        find_package(${kfname} REQUIRED COMPONENTS ${kf_required})
+    endif()
+endif()
+
+find_package(YAMLCPP REQUIRED)
+
+### Legacy support
+#
+#
+set(ClaudeInstall_LIB_DIRS "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+set(ClaudeInstall_INCLUDE_DIRS "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set(ClaudeInstall_LIBRARIES ClaudeInstall::claudeinstall)
+
+### CMake support
+#
+#
+include(ClaudeInstallAddBrandingSubdirectory)
+include(ClaudeInstallAddConfigLibrary)
+include(ClaudeInstallAddLibrary)
+include(ClaudeInstallAddModuleSubdirectory)
+include(ClaudeInstallAddPlugin)
+
+# These are feature-settings that affect consumers of ClaudeInstall
+# libraries as well; without QML-support in the libs, for instance,
+# there's no point in having a QML view module.
+#
+# This list should match the one in libclaudeinstall/ClaudeInstallConfig.h,
+# which is the C++-language side of the same configuration.
+set(ClaudeInstall_WITH_QML @WITH_QML@)
+set(ClaudeInstall_WITH_QT6 @WITH_QT6@)
