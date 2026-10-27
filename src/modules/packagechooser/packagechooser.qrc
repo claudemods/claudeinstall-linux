@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>images/no-selection.png</file>
+        <file>images/claudeinstall.png</file>
+    </qresource>
+</RCC>
