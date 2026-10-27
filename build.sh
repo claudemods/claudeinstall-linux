@@ -157,6 +157,41 @@ install_deps() {
 [ $DEPS = 1 ] && install_deps
 [ $BUILD = 0 ] && exit 0
 
+# ---- source tree sanity check ----------------------------------------------
+# A partial upload (e.g. GitHub's 100-file limit) or an overlay of an older tree
+# gives "Cannot find source file" errors from CMake. Catch that up front.
+#
+# The partition module's top-level files can end up in src/modules/ when a tree
+# is uploaded or copied in pieces (they are then picked up as bogus "modules" and
+# the partition module has no config). Move them back where they belong.
+_M="$SRCDIR/src/modules"; _P="$_M/partition"
+if [ -d "$_P" ]; then
+  for _f in Config.cpp Config.h PartitionTuiStep.cpp PartitionTuiStep.h \
+            PartitionViewStep.cpp PartitionViewStep.h partition.conf partition.schema.yaml jobs; do
+    if [ -e "$_M/$_f" ]; then
+      if [ -e "$_P/$_f" ]; then rm -rf "$_M/$_f"; else mv "$_M/$_f" "$_P/$_f"; fi
+      echo ":: Repaired tree: src/modules/$_f -> src/modules/partition/$_f"
+    fi
+  done
+  # partition's tests/ directory, misplaced as src/modules/tests/
+  if [ -d "$_M/tests" ]; then
+    if [ -e "$_P/tests/CMakeLists.txt" ]; then rm -rf "$_M/tests"
+    else mkdir -p "$_P/tests" && cp -a "$_M/tests/." "$_P/tests/" && rm -rf "$_M/tests"; fi
+    echo ":: Repaired tree: removed misplaced src/modules/tests"
+  fi
+  rm -f "$_M/?"
+fi
+_bad=0
+for _cml in "$SRCDIR"/src/modules/*/CMakeLists.txt; do
+  _md=$(dirname "$_cml")
+  for _s in $(grep -oE '[A-Za-z0-9_./-]+\.(cpp|ui|qrc)' "$_cml" | grep -v '^\.\./' | grep -v '^/'); do
+    if [ ! -e "$_md/$_s" ] && [ ! -e "$SRCDIR/$_s" ]; then
+      echo "! Missing source: ${_md#$SRCDIR/}/$_s" >&2; _bad=1
+    fi
+  done
+done
+[ $_bad = 0 ] || { echo "! Fix the tree (re-copy the missing files from the full project) and rerun." >&2; exit 1; }
+
 # ---- build ------------------------------------------------------------------
 [ $CLEAN = 1 ] && rm -rf "$BUILDDIR"
 GEN=Ninja
