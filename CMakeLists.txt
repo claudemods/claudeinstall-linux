@@ -370,7 +370,12 @@ if(WITH_TUI)
         set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(FTXUI_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(ftxui GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git GIT_TAG v5.0.0)
+        # FTXUI is built as static libraries, but they are linked into the shared
+        # libclaudeinstalltui, so they must be position independent.
+        set(_ci_saved_pic "${CMAKE_POSITION_INDEPENDENT_CODE}")
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
         FetchContent_MakeAvailable(ftxui)
+        set(CMAKE_POSITION_INDEPENDENT_CODE "${_ci_saved_pic}")
     endif()
 endif()
 
