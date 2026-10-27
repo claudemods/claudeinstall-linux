@@ -122,17 +122,19 @@ navigation: widget
 # are set to "true" (they can also be overridden).
 strings:
     productName:         "${NAME}"
-    shortProductName:    Generic
-    version:             2023.3 LTS
-    shortVersion:        2023.3
-    versionedName:       Fancy GNU/Linux 2023.3 LTS "Venomous Vole"
-    shortVersionedName:  FancyGL 2023.3
-    bootloaderEntryName: FancyGL
-    productUrl:          https://claudeinstall.io/
-    supportUrl:          https://github.com/claudeinstall/claudeinstall/wiki
-    knownIssuesUrl:      https://github.com/claudeinstall/claudeinstall/issues
-    releaseNotesUrl:     https://claudeinstall.io/news/
-    donateUrl:           https://kde.org/community/donations/index.php
+    shortProductName:    "${NAME}"
+    version:             rolling
+    shortVersion:        rolling
+    versionedName:       "${PRETTY_NAME}"
+    shortVersionedName:  "${NAME}"
+    bootloaderEntryName: "${NAME}"
+    # No URLs: the Support / Known issues / Donate buttons are only shown for
+    # a URL that is set. Add your own here to show them.
+    productUrl:          ""
+    supportUrl:          ""
+    knownIssuesUrl:      ""
+    releaseNotesUrl:     ""
+    donateUrl:           ""
 
 # These images are loaded from the branding module directory.
 #
@@ -163,8 +165,8 @@ strings:
 # These filenames can also use substitutions from os-release (see above).
 images:
     # productBanner:       "banner.png"
-    productIcon:         "squid.png"
-    productLogo:         "mascot.png"
+    productIcon:         "mascot.svg"
+    productLogo:         "mascot.svg"
     # productWallpaper:    "wallpaper.png"
     productWelcome:      "languages.png"
 
