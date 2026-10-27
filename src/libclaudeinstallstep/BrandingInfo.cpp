@@ -10,6 +10,7 @@
 #include "BrandingInfo.h"
 
 #include "GlobalStorage.h"
+#include "compat/Variant.h"
 #include "utils/Logger.h"
 #include "utils/Variant.h"
 #include "utils/Yaml.h"

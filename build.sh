@@ -175,8 +175,8 @@ if [ -d "$_P" ]; then
   done
   # partition's tests/ directory, misplaced as src/modules/tests/
   if [ -d "$_M/tests" ]; then
-    if [ -e "$_P/tests/CMakeLists.txt" ]; then rm -rf "$_M/tests"
-    else mkdir -p "$_P/tests" && cp -a "$_M/tests/." "$_P/tests/" && rm -rf "$_M/tests"; fi
+    # merge (never overwrite what is already there), then drop the misplaced copy
+    mkdir -p "$_P/tests" && cp -an "$_M/tests/." "$_P/tests/" && rm -rf "$_M/tests"
     echo ":: Repaired tree: removed misplaced src/modules/tests"
   fi
   rm -f "$_M/?"
@@ -201,7 +201,17 @@ command -v ninja >/dev/null 2>&1 || command -v samu >/dev/null 2>&1 || GEN="Unix
 cmake -S "$SRCDIR" -B "$BUILDDIR" -G "$GEN" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
   -DINSTALL_CONFIG=ON -DWITH_QT6=$QT6 -DWITH_GUI=$GUI -DWITH_TUI=$TUI $CMAKE_ARGS
-cmake --build "$BUILDDIR" -j "$JOBS"
+# Keep going after a failed file (ninja -k 0) so one run lists every compile error.
+if [ "$GEN" = Ninja ]; then
+  cmake --build "$BUILDDIR" -j "$JOBS" -- -k 0 2>&1 | tee "$BUILDDIR/build.log"
+  [ "${PIPESTATUS:-0}" = 0 ] || true
+  grep -E 'error:|FAILED:' "$BUILDDIR/build.log" > "$BUILDDIR/errors.log" || true
+  if [ -s "$BUILDDIR/errors.log" ]; then
+    echo; echo "! Build failed. All errors are in $BUILDDIR/errors.log (full log: $BUILDDIR/build.log)"; exit 1
+  fi
+else
+  cmake --build "$BUILDDIR" -j "$JOBS"
+fi
 
 if [ $INSTALL = 1 ]; then
   $SUDO cmake --install "$BUILDDIR"
