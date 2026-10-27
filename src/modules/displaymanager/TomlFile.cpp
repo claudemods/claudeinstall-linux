@@ -470,7 +470,7 @@ formatString( const QString& s )
         default:
             if ( c.unicode() < 0x20 || c.unicode() == 0x7f )
             {
-                out += QStringLiteral( "\\u%1" ).arg( c.unicode(), 4, 16, QChar( '0' ) );
+                out += QStringLiteral( "\\u%1" ).arg( uint( c.unicode() ), 4, 16, QChar( '0' ) );
             }
             else
             {

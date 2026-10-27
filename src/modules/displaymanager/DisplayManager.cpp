@@ -95,7 +95,7 @@ writeText( const QString& path, const QString& text )
 
 /** @brief Replaces each line of the file at @p path that matches @p re by @p replacement
  *
- * This is what `sed -i -e "s/^.*foo=.*/foo=bar/"` does. A missing file is ignored.
+ * This is what a `sed -i` substitution of whole lines does. A missing file is ignored.
  */
 void
 replaceMatchingLines( const QString& path, const QRegularExpression& re, const QString& replacement )

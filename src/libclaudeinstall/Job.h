@@ -41,6 +41,8 @@ public:
     // Can't copy, but you can keep a temporary
     JobResult( const JobResult& rhs ) = delete;
     JobResult( JobResult&& rhs );
+    JobResult& operator=( const JobResult& rhs ) = delete;
+    JobResult& operator=( JobResult&& rhs );
 
     virtual ~JobResult() {}
 

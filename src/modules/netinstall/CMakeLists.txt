@@ -12,6 +12,7 @@ claudeinstall_add_config_library(netinstall_config
         PackageTreeItem.cpp
         PackageModel.cpp
     LINK_LIBRARIES
+        ${qtname}::Gui
         ${qtname}::Network
 )
 

@@ -19,6 +19,15 @@ JobResult::JobResult( JobResult&& rhs )
 {
 }
 
+JobResult&
+JobResult::operator=( JobResult&& rhs )
+{
+    m_message = std::move( rhs.m_message );
+    m_details = std::move( rhs.m_details );
+    m_number = rhs.m_number;
+    return *this;
+}
+
 JobResult::operator bool() const
 {
     return m_number == 0;

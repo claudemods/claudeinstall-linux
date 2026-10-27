@@ -124,7 +124,7 @@ ServicesOpenrcJob::update( const QString& state, const QVariantList& services ) 
 ClaudeInstall::JobResult
 ServicesOpenrcJob::exec()
 {
-    const auto r = update( QStringLiteral( "add" ), m_add );
+    auto r = update( QStringLiteral( "add" ), m_add );
     if ( !r )
     {
         return r;

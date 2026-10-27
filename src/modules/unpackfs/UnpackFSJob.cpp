@@ -159,7 +159,7 @@ UnpackFSJob::setStatus( const QString& status )
 void
 UnpackFSJob::reportProgress()
 {
-    double progress = 0.0;
+    double progressValue = 0.0;
 
     qint64 currentTotal = 0;
     qint64 currentDone = 0;  // Files count in the current entry
@@ -188,7 +188,7 @@ UnpackFSJob::reportProgress()
 
     if ( currentTotal > 0 )
     {
-        progress = completeWeight / m_totalWeight;
+        progressValue = completeWeight / m_totalWeight;
     }
 
     setStatus( tr( "Unpacking image %1/%2, file %3/%4" )
@@ -196,7 +196,7 @@ UnpackFSJob::reportProgress()
                    .arg( m_entries.size() )
                    .arg( currentDone )
                    .arg( currentTotal ) );
-    emit progress( progress );
+    emit progress( progressValue );
 }
 
 qint64

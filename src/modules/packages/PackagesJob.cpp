@@ -42,7 +42,7 @@ PackagesJob::prettyStatusMessage() const
         if ( m_totalPackages > 0 )
         {
             // Outside the context of an operation
-            return tr( "Processing packages (%1 / %2)", "@status" ).arg( m_completedPackages ).arg( m_totalPackages );
+            return tr( "Processing packages (%1 / %2)", "@status" ).arg( m_completedPackages.load() ).arg( m_totalPackages.load() );
         }
         return tr( "Install packages.", "@status" );
     }

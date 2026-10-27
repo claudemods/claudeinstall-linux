@@ -242,7 +242,7 @@ LocaleCfgJob::exec()
             return ClaudeInstall::JobResult::error( tr( "Configuration Error" ),
                                                 tr( "Could not write <pre>%1</pre>." ).arg( targetLocaleGen ) );
         }
-        ClaudeInstall::System::instance()->targetEnvCall( { "locale-gen" } );
+        ClaudeInstall::System::instance()->targetEnvCall( QStringList { QStringLiteral( "locale-gen" ) } );
         cDebug() << targetLocaleGen << "done";
     }
 
