@@ -77,7 +77,7 @@ operator<<( CDebug&& s, const FuncSuppressor& f )
         s.m_funcinfo = nullptr;
         s.m_msg = QString( f.m_s );
     }
-    return s;
+    return static_cast< CDebug& >( s );  // C++23: a named CDebug&& parameter would otherwise be returned as an rvalue
 }
 
 inline QDebug&
@@ -381,17 +381,17 @@ operator<<( CDebug&& s, const Once& o )
     if ( !logLevelEnabled( s.level() ) )
     {
         // This won't print, so it's not using the "onceness"
-        return s;
+        return static_cast< CDebug& >( s );  // C++23: a named CDebug&& parameter would otherwise be returned as an rvalue
     }
 
     if ( o.m )
     {
         o.m = false;
-        return s;
+        return static_cast< CDebug& >( s );  // C++23: a named CDebug&& parameter would otherwise be returned as an rvalue
     }
     s.m_funcinfo = nullptr;
     s << SubEntry;
-    return s;
+    return static_cast< CDebug& >( s );  // C++23: a named CDebug&& parameter would otherwise be returned as an rvalue
 }
 
 }  // namespace Logger
