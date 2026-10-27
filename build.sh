@@ -7,7 +7,9 @@
 # Usage: ./build.sh [options]
 #   --deps-only      only install build dependencies
 #   --no-deps        skip installing dependencies
-#   --new | --clone  new-system installer, or clone of the running system
+#   --new | --clone | --claudemodsdistrosonline   new-system installer, clone of the running system,
+#                    or the claudemods distributions installed online (pacstrap + profile; works with
+#                    --gui, --tui or --both; needs arch-install-scripts, curl, unzip; --distro = same)
 #   --gui | --tui | --both   which interface (GUI is always Qt6)
 #   --test           try the installer on a machine whose only disk holds the running
 #                    system (it is normally hidden, which blocks the first page).
@@ -40,11 +42,12 @@ for a in "$@"; do
     --both)      GUI=ON TUI=ON ;;
     --new)       MODE=new ;;
     --clone)     MODE=clone ;;
+    --claudemodsdistrosonline|--distro) MODE=distro ;;
     --test)      CMAKE_ARGS="$CMAKE_ARGS -DDEBUG_PARTITION_UNSAFE=ON" ;;
     --install)   INSTALL=1 ;;
     --package)   PACKAGE=1 ;;
     --clean)     CLEAN=1 ;;
-    -h|--help)   sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a" >&2; exit 1 ;;
   esac
 done
@@ -61,14 +64,13 @@ ask() { # ask VAR "question" "1) a" "2) b" ...
   eval "$_var=$_r"
 }
 if [ -z "$MODE" ]; then
-  ask _m "What is this installer for?" "1) New system setup (create users, install packages)" "2) Cloned system (copy this running system; no new users, no package install)"
-  [ "$_m" = 2 ] && MODE=clone || MODE=new
+  ask _m "What is this installer for?" "1) New system setup (create users, install packages)" "2) Cloned system (copy this running system; no new users, no package install)" "3) claudemods distributions (pacstrap + profile: Spitfire / Apex ...)"
+  case $_m in 2) MODE=clone ;; 3) MODE=distro ;; *) MODE=new ;; esac
 fi
 if [ -z "$GUI" ]; then
   ask _u "Which interface?" "1) GUI (Qt6)" "2) TUI (terminal)" "3) Both"
   case $_u in 2) GUI=OFF TUI=ON ;; 3) GUI=ON TUI=ON ;; *) GUI=ON TUI=OFF ;; esac
-fi
-echo ":: Mode: $MODE, GUI=$GUI, TUI=$TUI (Qt6)"
+fiecho ":: Mode: $MODE, GUI=$GUI, TUI=$TUI (Qt6)"
 
 # Install the chosen configuration under $1 (a root, e.g. DESTDIR or empty).
 install_config() {
@@ -78,12 +80,31 @@ install_config() {
   $SUDO install -Dm755 "$SRCDIR/claudeinstall-colors" "$1/usr/bin/claudeinstall-colors"
   # claudeconfig: settings command, plus the claudemods preset it can install
   $SUDO install -Dm755 "$SRCDIR/claudeconfig" "$1/usr/bin/claudeconfig"
+  # claudeinstall-pkgfix: refresh/resolve package lists so stale names don't break installs
+  $SUDO install -Dm755 "$SRCDIR/claudeinstall-pkgfix" "$1/usr/bin/claudeinstall-pkgfix"
   for _pf in "$SRCDIR"/config/*/settings.conf "$SRCDIR"/config/*/modules/*.conf; do
     [ -f "$_pf" ] || continue
     _rel=${_pf#"$SRCDIR"/config/}
     $SUDO install -Dm644 "$_pf" "$1/usr/share/claudeinstall/presets/$_rel"
   done
-  if [ "$MODE" = clone ]; then
+  if [ "$MODE" = distro ]; then
+    # claudemods distributions: pacstrap + profile (modules/distroprofile), chosen on the "Distribution" page
+    $SUDO cp "$SRCDIR/settings-distro.conf" "$_d/settings.conf"
+    $SUDO install -Dm644 "$SRCDIR/packagechooser-distro.conf" "$_d/modules/packagechooser-distro.conf"
+    $SUDO install -Dm644 "$SRCDIR/src/modules/distroprofile/distroprofile.conf" "$_d/modules/distroprofile.conf"
+    $SUDO install -Dm644 "$SRCDIR/src/modules/distroprofile/distroprofile-customize.conf" "$_d/modules/distroprofile-customize.conf"
+    for _p in "$SRCDIR"/profiles/*.conf; do
+      $SUDO install -Dm644 "$_p" "$1/usr/share/claudeinstall/profiles/$(basename "$_p")"
+    done
+    # your needed-files/ (grub/plymouth/sddm themes, pacman.conf, pacman.d.zip, tweaks scripts ...)
+    if [ -d "$SRCDIR/needed-files" ]; then
+      $SUDO mkdir -p "$1/usr/share/claudeinstall/needed-files"
+      $SUDO cp -a "$SRCDIR/needed-files/." "$1/usr/share/claudeinstall/needed-files/"
+    else
+      echo "! $SRCDIR/needed-files is missing: profiles will fail on their copy steps until it is added" >&2
+    fi
+    $SUDO install -Dm755 "$SRCDIR/claudeinstall-pkgfix" "$1/usr/bin/claudeinstall-pkgfix"
+  elif [ "$MODE" = clone ]; then
     $SUDO cp "$SRCDIR/settings-clone.conf" "$_d/settings.conf"
     $SUDO cp "$SRCDIR/unpackfs-clone.conf" "$_d/modules/unpackfs-clone.conf"
   else
@@ -146,8 +167,9 @@ install_deps() {
     else
       QT="qt5-base qt5-tools qt5-svg qt5-declarative kcoreaddons5 kcrash5 ki18n5 kwidgetsaddons5 polkit-qt5"
     fi
+    # --distro also needs pacstrap (arch-install-scripts), curl and unzip at install time
     $SUDO pacman -Sy --noconfirm --needed base-devel cmake ninja git extra-cmake-modules yaml-cpp kpmcore \
-      parted icu libatasmart libpwquality rsync squashfs-tools $QT
+      parted icu libatasmart libpwquality rsync squashfs-tools arch-install-scripts curl unzip $QT
     ;;
   alpine)
     $SUDO apk add build-base cmake samurai git gettext-dev extra-cmake-modules yaml-cpp-dev kpmcore-dev \
@@ -249,4 +271,5 @@ if [ $PACKAGE = 1 ]; then
   echo ":: Package output is in $PWD and $BUILDDIR (fpm needed for deb/rpm/pacman; tarball otherwise)"
 fi
 
+[ "$MODE" = distro ] && echo ":: claudemods distros online: run  sudo claudeinstall  (GUI)  or  sudo claudeinstall-tui  (TUI)"
 echo ":: Done. GUI: $BUILDDIR/src/claudeinstall/claudeinstall  TUI: $BUILDDIR/src/claudeinstall-tui/claudeinstall-tui"

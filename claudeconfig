@@ -20,7 +20,7 @@
 #   claudeconfig image show | tools            current image / are the tools + kernel support there
 #
 #   claudeconfig fs default btrfs|ext4|f2fs|xfs     default filesystem
-#   claudeconfig fs available btrfs,ext4,f2fs,xfs   filesystems offered
+#   claudeconfig fs available all|btrfs,ext4,...    filesystems offered (default: all)
 #   claudeconfig swap CHOICES                  e.g. none,small,suspend,file
 #   claudeconfig swap initial none|small|suspend|file
 #   claudeconfig partition initial erase|alongside|replace|manual
@@ -240,8 +240,8 @@ case $cmd in
     case $1 in
       default) case $2 in btrfs|ext4|f2fs|xfs|zfs|ext3|ext2|reiser|jfs) ;; *) die "unknown filesystem '$2'" ;; esac
                setkey "$f" defaultFileSystemType "\"$2\""
-               grep -E '^availableFileSystemTypes:' "$f" | grep -q "\"$2\"" || echo "note: $2 is not in availableFileSystemTypes (claudeconfig fs available ...)" ;;
-      available) l=$(echo "$2" | sed 's/[^,]\+/"&"/g'); setkey "$f" availableFileSystemTypes "[$l]" ;;
+               grep -E '^availableFileSystemTypes:' "$f" | grep -qE "\"($2|all)\"" || echo "note: $2 is not in availableFileSystemTypes (claudeconfig fs available ...)" ;;
+      available) l=$(echo "$2" | sed 's/[^,]\+/"&"/g'); setkey "$f" availableFileSystemTypes "[$l]" ;;  # "all" = every creatable filesystem (the default)
       *) die "fs default FS | available a,b,c" ;;
     esac ;;
   swap)

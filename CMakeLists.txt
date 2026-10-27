@@ -242,7 +242,19 @@ include(CMakeColors)
 
 ### C++ SETUP
 #
-set(CMAKE_CXX_STANDARD 17)
+# Newest standard the compiler supports (C++23 needs GCC 13+ / Clang 17+, CMake 3.20+);
+# force one with -DCLAUDEINSTALL_CXX_STANDARD=17|20|23. The code itself needs only C++17.
+set(CLAUDEINSTALL_CXX_STANDARD "" CACHE STRING "C++ standard to build with (17, 20, 23; empty = newest available)")
+if(NOT CLAUDEINSTALL_CXX_STANDARD)
+    set(CLAUDEINSTALL_CXX_STANDARD 17)
+    foreach(_std 20 23)
+        if("cxx_std_${_std}" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+            set(CLAUDEINSTALL_CXX_STANDARD ${_std})
+        endif()
+    endforeach()
+endif()
+set(CMAKE_CXX_STANDARD ${CLAUDEINSTALL_CXX_STANDARD})
+message(STATUS "Building with C++${CMAKE_CXX_STANDARD}")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror=return-type")
 set(CMAKE_CXX_FLAGS_DEBUG "-Og -g ${CMAKE_CXX_FLAGS_DEBUG}")

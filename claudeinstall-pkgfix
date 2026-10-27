@@ -1,0 +1,110 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: no
+# SPDX-License-Identifier: CC0-1.0
+#
+# claudeinstall-pkgfix - make package installs survive changing package lists.
+#
+# The claudemods/cachyos meta-packages (*.pkg.tar.zst) are snapshots: ~1000 fixed
+# package names. Repositories rename, split and drop packages, so one stale name
+# makes "pacstrap" / "pacman -S" fail for the whole list ("target not found").
+# This tool keeps the lists as data and checks them against the LIVE repositories
+# every time, so nothing has to be re-packaged when a name changes.
+#
+#   claudeinstall-pkgfix refresh                  refresh sync databases (fixes stale lists / 404)
+#   claudeinstall-pkgfix extract FILE.pkg.tar.zst print the package list stored in a meta-package
+#   claudeinstall-pkgfix resolve LIST|PKG...      print what exists NOW; report what is missing
+#                                                 (LIST = file with one name per line, # comments ok)
+#   claudeinstall-pkgfix pacstrap TARGET LIST|PKG...   resolve, then pacstrap (retries, refreshes)
+#   claudeinstall-pkgfix install LIST|PKG...      resolve, then pacman -S on the running system
+#
+# Names that no longer exist are replaced by whatever now "provides" them when
+# there is exactly one candidate; otherwise they are skipped and written to
+# $PKGFIX_MISSING (default /tmp/claudeinstall-missing.txt).
+#
+# Environment: PKGFIX_RETRIES (default 3)
+
+set -u
+RETRIES=${PKGFIX_RETRIES:-3}
+MISSING=${PKGFIX_MISSING:-/tmp/claudeinstall-missing.txt}
+SUDO=; [ "$(id -u)" -ne 0 ] && SUDO=sudo
+
+die() { echo "! $*" >&2; exit 1; }
+command -v pacman >/dev/null 2>&1 || die "pacman not found (Arch family only; other distros are handled by the installer's packages module)"
+
+refresh() {
+  $SUDO rm -f /var/lib/pacman/db.lck
+  # -Syy forces a re-download even if the local copy looks current
+  $SUDO pacman -Syy --noconfirm || return 1
+  # keyring first, or freshly rotated signing keys give "invalid or corrupted package"
+  $SUDO pacman -S --needed --noconfirm archlinux-keyring >/dev/null 2>&1 || true
+  [ -d /usr/share/pacman/keyrings ] && ls /usr/share/pacman/keyrings/cachyos* >/dev/null 2>&1 \
+    && $SUDO pacman -S --needed --noconfirm cachyos-keyring >/dev/null 2>&1
+  return 0
+}
+
+extract() {
+  [ -f "${1:-}" ] || die "extract: no such file: ${1:-}"
+  # a meta-package's "depend =" lines are its package list (versions stripped)
+  tar -xOf "$1" .PKGINFO | sed -n 's/^depend = \([^<>=: ]*\).*/\1/p'
+}
+
+# expand arguments: files are read, anything else is a package name
+expand() {
+  for a in "$@"; do
+    if [ -f "$a" ]; then sed 's/#.*//' "$a" | tr -s ' \t' '\n\n'; else echo "$a"; fi
+  done | sed '/^$/d' | sort -u
+}
+
+# resolve: stdin names -> stdout names that exist now
+resolve() {
+  : > "$MISSING"
+  all=$(pacman -Slq 2>/dev/null | sort -u)
+  [ -n "$all" ] || die "no package databases - run: claudeinstall-pkgfix refresh"
+  groups=$(pacman -Sgq 2>/dev/null | sort -u)
+  while read -r n; do
+    [ -n "$n" ] || continue
+    if printf '%s\n' "$all" | grep -qx -- "$n" || printf '%s\n' "$groups" | grep -qx -- "$n"; then
+      echo "$n"; continue
+    fi
+    # renamed/split? ask who provides it now
+    alt=$(pacman -Ssq -- "^$(printf '%s' "$n" | sed 's/[][\.*^$+?(){}|/]/\\&/g')\$" 2>/dev/null | sort -u)
+    if [ "$(printf '%s\n' "$alt" | sed '/^$/d' | wc -l)" = 1 ]; then
+      echo "~ $n -> $alt (provided by)" >&2; echo "$alt"
+    else
+      echo "- $n (no longer in the repositories, skipped)" >&2; echo "$n" >> "$MISSING"
+    fi
+  done
+}
+
+with_retries() { # with_retries cmd...
+  i=0
+  while :; do
+    "$@" && return 0
+    i=$((i+1)); [ "$i" -gt "$RETRIES" ] && return 1
+    echo ":: attempt $i failed - refreshing package lists and retrying" >&2
+    refresh || true; sleep 2
+  done
+}
+
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case $cmd in
+  refresh)  refresh ;;
+  extract)  extract "$@" ;;
+  resolve)  expand "$@" | resolve ;;
+  pacstrap)
+    [ $# -ge 2 ] || die "usage: pacstrap TARGET LIST|PKG..."
+    target=$1; shift
+    refresh || echo "! refresh failed, continuing with the lists we have" >&2
+    list=$(expand "$@" | resolve) || exit 1
+    [ -s "$MISSING" ] && echo ":: $(wc -l < "$MISSING") package(s) skipped, see $MISSING" >&2
+    # shellcheck disable=SC2086
+    with_retries $SUDO pacstrap -K "$target" $list ;;
+  install)
+    refresh || true
+    list=$(expand "$@" | resolve) || exit 1
+    [ -s "$MISSING" ] && echo ":: $(wc -l < "$MISSING") package(s) skipped, see $MISSING" >&2
+    # shellcheck disable=SC2086
+    with_retries $SUDO pacman -S --needed --noconfirm $list ;;
+  ""|-h|--help) sed -n '2,25p' "$0" ;;
+  *) die "unknown command: $cmd (try --help)" ;;
+esac

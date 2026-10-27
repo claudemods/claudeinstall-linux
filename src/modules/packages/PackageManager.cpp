@@ -55,6 +55,109 @@ uncheckedCall( const QStringList& command )
     ClaudeInstall::System::instance()->targetEnvCommand( command );
 }
 
+/** @brief Runs @p command; on failure refreshes the package lists and tries again
+ *
+ * Repositories change under a running install: the lists on the target go
+ * stale and a package (or its old version) is "not found" or answers 404.
+ * @p refresh runs between attempts (its failure is ignored). The last
+ * failure is thrown when all @p retries are used up.
+ */
+void
+checkCallRefreshing( const QStringList& command, const std::function< void() >& refresh, int retries = 2 )
+{
+    for ( int attempt = 0;; ++attempt )
+    {
+        try
+        {
+            checkCall( command );
+            return;
+        }
+        catch ( const CommandFailed& e )
+        {
+            if ( attempt >= retries )
+            {
+                throw;
+            }
+            cWarning() << "Command" << command.join( ' ' ) << "failed with exit code" << e.exitCode
+                       << "- refreshing the package lists and retrying";
+            refresh();
+            QThread::sleep( 2 );
+        }
+    }
+}
+
+/// The package names that a package manager's @p output says it cannot find
+QStringList
+missingPackages( const QString& output )
+{
+    // pacman, apt (two forms), dnf/dnf5/yum, zypper, apk, xbps
+    static const QRegularExpression re(
+        QStringLiteral( "target not found: (\\S+)"
+                        "|Unable to locate package (\\S+)"
+                        "|Package '?([^\\s']+)'? has no installation candidate"
+                        "|No match for argument: (\\S+)"
+                        "|Package '([^']+)' not found"
+                        "|(\\S+) \\(no such package\\)" ) );
+    QStringList names;
+    auto it = re.globalMatch( output );
+    while ( it.hasNext() )
+    {
+        const auto m = it.next();
+        for ( int i = 1; i <= m.lastCapturedIndex(); ++i )
+        {
+            if ( !m.captured( i ).isEmpty() )
+            {
+                names << m.captured( i );
+            }
+        }
+    }
+    names.removeDuplicates();
+    return names;
+}
+
+/** @brief Installs @p pkgs, surviving package lists that change over time
+ *
+ * Package lists are snapshots: later, packages are renamed, split or dropped.
+ * First an install failure refreshes the package lists and retries. If
+ * packages are still reported as not existing, they are left out (and
+ * logged) and the rest is installed, instead of one stale name failing the
+ * whole list. Other failures are thrown.
+ *
+ * @p command builds the install command for a list of packages.
+ */
+void
+installTolerant( QStringList pkgs,
+                 const std::function< QStringList( const QStringList& ) >& command,
+                 const std::function< void() >& refresh )
+{
+    for ( int round = 0; !pkgs.isEmpty(); ++round )
+    {
+        try
+        {
+            checkCallRefreshing( command( pkgs ), refresh );
+            return;
+        }
+        catch ( const CommandFailed& e )
+        {
+            const QStringList missing = missingPackages( e.output );
+            QStringList kept;
+            for ( const QString& p : pkgs )
+            {
+                if ( !missing.contains( p ) )
+                {
+                    kept << p;
+                }
+            }
+            if ( kept.size() == pkgs.size() || round >= 5 )
+            {
+                throw;  // not (only) a missing package
+            }
+            cWarning() << "Skipping packages that are no longer in the repositories:" << missing;
+            pkgs = kept;
+        }
+    }
+}
+
 QString
 packageName( const QVariant& packageData )
 {
@@ -67,10 +170,10 @@ public:
     QString backend() const override { return QStringLiteral( "apk" ); }
     void install( const QStringList& pkgs, bool ) override
     {
-        for ( const QString& pkg : pkgs )
-        {
-            checkCall( { "apk", "add", pkg } );
-        }
+        installTolerant(
+            pkgs,
+            []( const QStringList& p ) { return QStringList { "apk", "add" } + p; },
+            [] { uncheckedCall( { "apk", "update" } ); } );
     }
     void remove( const QStringList& pkgs ) override
     {
@@ -89,7 +192,14 @@ public:
     QString backend() const override { return QStringLiteral( "apt" ); }
     void install( const QStringList& pkgs, bool ) override
     {
-        checkCall( QStringList { "apt-get", "-q", "-y", "install" } + pkgs );
+        installTolerant(
+            pkgs,
+            []( const QStringList& p ) { return QStringList { "apt-get", "-q", "-y", "--fix-missing", "install" } + p; },
+            []
+            {
+                uncheckedCall( { "dpkg", "--configure", "-a" } );
+                uncheckedCall( { "apt-get", "update" } );
+            } );
     }
     void remove( const QStringList& pkgs ) override
     {
@@ -107,7 +217,10 @@ public:
     QString backend() const override { return QStringLiteral( "dnf" ); }
     void install( const QStringList& pkgs, bool ) override
     {
-        checkCall( QStringList { "dnf-3", "-y", "install" } + pkgs );
+        installTolerant(
+            pkgs,
+            []( const QStringList& p ) { return QStringList { "dnf-3", "-y", "install" } + p; },
+            [] { uncheckedCall( { "dnf-3", "-y", "makecache", "--refresh" } ); } );
     }
     void remove( const QStringList& pkgs ) override
     {
@@ -125,7 +238,10 @@ public:
     QString backend() const override { return QStringLiteral( "dnf5" ); }
     void install( const QStringList& pkgs, bool ) override
     {
-        checkCall( QStringList { "dnf5", "-y", "install" } + pkgs );
+        installTolerant(
+            pkgs,
+            []( const QStringList& p ) { return QStringList { "dnf5", "-y", "install" } + p; },
+            [] { uncheckedCall( { "dnf5", "-y", "makecache", "--refresh" } ); } );
     }
     void remove( const QStringList& pkgs ) override
     {
@@ -245,9 +361,22 @@ public:
         {
             command << "--disable-download-timeout";
         }
-        command += pkgs;
+        // Local files (-U) do not depend on the package lists
+        if ( fromLocal )
+        {
+            command += pkgs;
+            runPacman( command );
+            return;
+        }
 
-        runPacman( command );
+        installTolerant(
+            pkgs,
+            [ command ]( const QStringList& p ) { return command + p; },
+            []
+            {
+                uncheckedCall( { "rm", "-f", "/var/lib/pacman/db.lck" } );
+                uncheckedCall( { "pacman", "-Syy", "--noconfirm" } );
+            } );
     }
     void remove( const QStringList& pkgs ) override
     {
@@ -354,10 +483,16 @@ class PMXbps : public PackageManager
 {
 public:
     QString backend() const override { return QStringLiteral( "xbps" ); }
-    void install( const QStringList& pkgs, bool ) override { runXbps( QStringList { "xbps-install", "-Sy" } + pkgs ); }
+    void install( const QStringList& pkgs, bool ) override
+    {
+        installTolerant(
+            pkgs,
+            []( const QStringList& p ) { return QStringList { "xbps-install", "-Sy" } + p; },
+            [] { uncheckedCall( { "xbps-install", "-S" } ); } );
+    }
     void remove( const QStringList& pkgs ) override { runXbps( QStringList { "xbps-remove", "-Ry" } + pkgs ); }
     void updateDb() override { runXbps( { "xbps-install", "-S" } ); }
-    void updateSystem() override { runXbps( { "xbps", "-Suy" } ); }
+    void updateSystem() override { runXbps( { "xbps-install", "-Suy" } ); }
 
 private:
     void runXbps( const QStringList& command )
@@ -375,7 +510,13 @@ class PMYum : public PackageManager
 {
 public:
     QString backend() const override { return QStringLiteral( "yum" ); }
-    void install( const QStringList& pkgs, bool ) override { checkCall( QStringList { "yum", "-y", "install" } + pkgs ); }
+    void install( const QStringList& pkgs, bool ) override
+    {
+        installTolerant(
+            pkgs,
+            []( const QStringList& p ) { return QStringList { "yum", "-y", "install" } + p; },
+            [] { uncheckedCall( { "yum", "-y", "clean", "expire-cache" } ); } );
+    }
     void remove( const QStringList& pkgs ) override
     {
         checkCall( QStringList { "yum", "--disablerepo=*", "-C", "-y", "remove" } + pkgs );
@@ -390,13 +531,14 @@ public:
     QString backend() const override { return QStringLiteral( "zypp" ); }
     void install( const QStringList& pkgs, bool ) override
     {
-        checkCall( QStringList { "zypper",
-                                 "--non-interactive",
-                                 "--quiet-install",
-                                 "install",
-                                 "--auto-agree-with-licenses",
-                                 "install" }
-                   + pkgs );
+        installTolerant(
+            pkgs,
+            []( const QStringList& p )
+            {
+                return QStringList { "zypper", "--non-interactive", "--quiet-install", "install", "--auto-agree-with-licenses" }
+                    + p;
+            },
+            [] { uncheckedCall( { "zypper", "--non-interactive", "refresh", "--force" } ); } );
     }
     void remove( const QStringList& pkgs ) override
     {
