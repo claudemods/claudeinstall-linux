@@ -1,0 +1,53 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: no
+# SPDX-License-Identifier: CC0-1.0
+#
+# claudeinstall-colors - change the installer's sidebar colours.
+#
+#   claudeinstall-colors default      the stock ClaudeInstall colours
+#   claudeinstall-colors claudemods   the claudemods colours (blue bar, cyan text)
+#   claudeinstall-colors custom BG TEXT CURRENT_BG CURRENT_TEXT
+#                                     e.g. custom "#00568f" "#24ffff" "#00568f" "#24ffff"
+#   claudeinstall-colors show         print the colours now in use
+#
+# Edits the "style:" section of the branding.desc of the installed branding
+# component. Run as root (or with sudo) for the system-wide installation.
+#
+# Environment: BRANDING_DIR (default /usr/share/claudeinstall/branding/default,
+#              or /etc/claudeinstall/branding/default if that exists)
+
+DIR=${BRANDING_DIR:-}
+if [ -z "$DIR" ]; then
+  for d in /etc/claudeinstall/branding/default /usr/share/claudeinstall/branding/default; do
+    [ -f "$d/branding.desc" ] && { DIR=$d; break; }
+  done
+fi
+DESC="$DIR/branding.desc"
+[ -f "$DESC" ] || { echo "! branding.desc not found (set BRANDING_DIR)" >&2; exit 1; }
+
+set_colors() { # bg text current-text current-bg
+  _tmp=$(mktemp) || exit 1
+  awk -v bg="$1" -v tx="$2" -v ctx="$3" -v cbg="$4" '
+    /^style:/ { print; instyle=1; next }
+    instyle && /^[^ #\t]/ { instyle=0 }
+    instyle && /SidebarBackgroundCurrent:/ { print "   SidebarBackgroundCurrent: \"" cbg "\""; next }
+    instyle && /SidebarTextCurrent:/       { print "   SidebarTextCurrent:       \"" ctx "\""; next }
+    instyle && /SidebarBackground:/        { print "   SidebarBackground:        \"" bg "\""; next }
+    instyle && /SidebarText:/              { print "   SidebarText:              \"" tx "\""; next }
+    { print }' "$DESC" > "$_tmp" && cat "$_tmp" > "$DESC"
+  rm -f "$_tmp"
+  echo "Colours set in $DESC"
+}
+
+valid() { echo "$1" | grep -Eq '^#[0-9A-Fa-f]{6}$'; }
+
+case $1 in
+  default)    set_colors "#292F34" "#FFFFFF" "#292F34" "#D35400" ;;
+  claudemods) set_colors "#00568f" "#24ffff" "#24ffff" "#00568f" ;;
+  custom)
+    [ $# -eq 5 ] || { echo "usage: $0 custom BG TEXT CURRENT_BG CURRENT_TEXT (each #RRGGBB)" >&2; exit 1; }
+    for c in "$2" "$3" "$4" "$5"; do valid "$c" || { echo "! not a #RRGGBB colour: $c" >&2; exit 1; }; done
+    set_colors "$2" "$3" "$5" "$4" ;;
+  show)       sed -n '/^style:/,/^$/p' "$DESC" ;;
+  *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

@@ -70,6 +70,8 @@ echo ":: Mode: $MODE, GUI=$GUI, TUI=$TUI (Qt6)"
 install_config() {
   _d="$1/etc/claudeinstall"
   $SUDO mkdir -p "$_d/modules"
+  # the colour command: claudeinstall-colors {default|claudemods|custom ...|show}
+  $SUDO install -Dm755 "$SRCDIR/claudeinstall-colors" "$1/usr/bin/claudeinstall-colors"
   if [ "$MODE" = clone ]; then
     $SUDO cp "$SRCDIR/settings-clone.conf" "$_d/settings.conf"
     $SUDO cp "$SRCDIR/unpackfs-clone.conf" "$_d/modules/unpackfs-clone.conf"

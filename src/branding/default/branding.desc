@@ -48,7 +48,7 @@ windowExpanding:    normal
 # This setting is ignored if "fullscreen" is selected for
 # *windowExpanding*, above. If not set, use constants defined
 # in ClaudeInstallUtilsGui, 800x520.
-windowSize: 800px,520px
+windowSize: 1100px,520px
 
 # Placement of ClaudeInstall window. Either "center" or "free".
 # Whether "center" actually works does depend on the window
@@ -78,7 +78,7 @@ windowPlacement: center
 # to putting the sidebar on the left. Also valid is "qml,top".
 # While "widget,top" is valid, the widgets code is **not** flexible
 # and results will be terrible.
-sidebar: widget
+sidebar: qml,bottom
 
 # Kind of navigation (button panel on the bottom).
 #  - "widget" or unset, use traditional navigation
@@ -164,7 +164,7 @@ strings:
 images:
     # productBanner:       "banner.png"
     productIcon:         "squid.png"
-    productLogo:         "squid.png"
+    productLogo:         "mascot.png"
     # productWallpaper:    "wallpaper.png"
     productWelcome:      "languages.png"
 
