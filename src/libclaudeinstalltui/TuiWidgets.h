@@ -93,6 +93,9 @@ TUIDLLEXPORT ftxui::Component field( const QString& label,
                                      const std::function< void() >& onChange,
                                      const std::function< QString() >& status = {} );
 
+/// @brief Makes the space bar act like Enter on @p component (menus only know Enter)
+TUIDLLEXPORT ftxui::Component acceptsSpace( ftxui::Component component );
+
 /// @brief A check box; @p onChange is called after the box is toggled
 TUIDLLEXPORT ftxui::Component check( const QString& label, bool* value, const std::function< void() >& onChange );
 

@@ -17,6 +17,8 @@
 #include <algorithm>
 
 #include <ftxui/component/component_options.hpp>
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 
 CLAUDEINSTALL_PLUGIN_FACTORY_DEFINITION( WelcomeTuiStepFactory, registerPlugin< WelcomeTuiStep >(); )
@@ -124,7 +126,15 @@ WelcomeTuiStep::createComponent()
             m_config->setLocaleIndex( m_languageRows[ m_languageSelected ] );
         }
     };
-    auto menu = ftxui::Menu( &m_languageNames, &m_languageSelected, option );
+    // Enter (or space) chooses the highlighted language and goes to the next page
+    option.on_enter = []
+    {
+        if ( auto* screen = ftxui::ScreenInteractive::Active() )
+        {
+            screen->PostEvent( ftxui::Event::Special( "\x0E" ) );  // Ctrl-N, see TuiApplication
+        }
+    };
+    auto menu = ClaudeInstall::Tui::acceptsSpace( ftxui::Menu( &m_languageNames, &m_languageSelected, option ) );
 
     return ftxui::Renderer(
         menu,
@@ -179,7 +189,7 @@ WelcomeTuiStep::createComponent()
                            separator(),
                            vbox( problems ),
                            separator(),
-                           text( " " + tr( "Choose your language (Up / Down, then Ctrl-N for Next)", "@title" ).toStdString() )
+                           text( " " + tr( "Choose your language: Up / Down, then Enter", "@title" ).toStdString() )
                                | bold,
                            menu->Render() | vscroll_indicator | frame | flex } );
         } );

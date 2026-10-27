@@ -11,6 +11,7 @@
 
 #include <ftxui/component/component_options.hpp>
 #include <ftxui/component/event.hpp>
+#include <ftxui/component/screen_interactive.hpp>
 
 #include <QRegularExpression>
 #include <QStringList>
@@ -160,6 +161,16 @@ field( const QString& label,
 }
 
 ftxui::Component
+acceptsSpace( ftxui::Component component )
+{
+    using namespace ftxui;
+    // A menu only reacts to Enter; the space bar chooses too
+    return CatchEvent( component,
+                       [ component ]( Event event )
+                       { return event == Event::Character( ' ' ) && component->OnEvent( Event::Return ); } );
+}
+
+ftxui::Component
 check( const QString& label, bool* value, const std::function< void() >& onChange )
 {
     ftxui::CheckboxOption option = ftxui::CheckboxOption::Simple();
@@ -177,7 +188,16 @@ picker( const QString& title,
 
     MenuOption option = MenuOption::Vertical();
     option.on_change = onChange;
+    // Enter chooses the highlighted entry and moves on to the next field
+    option.on_enter = []
+    {
+        if ( auto* screen = ScreenInteractive::Active() )
+        {
+            screen->PostEvent( Event::Tab );
+        }
+    };
     Component menu = Menu( entries, selected, option );
+    menu = acceptsSpace( menu );
 
     const std::string heading = str( title );
     return Renderer( menu,
