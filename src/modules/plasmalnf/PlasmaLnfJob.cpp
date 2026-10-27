@@ -1,0 +1,72 @@
+/* === This file is part of ClaudeInstall - <https://claudeinstall.io> ===
+ *
+ *   SPDX-FileCopyrightText: 2017 Adriaan de Groot <groot@kde.org>
+ *   SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ *   ClaudeInstall is Free Software: see the License-Identifier above.
+ *
+ */
+
+#include "PlasmaLnfJob.h"
+
+#include "GlobalStorage.h"
+#include "JobQueue.h"
+#include "utils/Logger.h"
+#include "utils/System.h"
+
+#ifdef WITH_KCONFIG
+#include <KConfigGroup>
+#include <KSharedConfig>
+#endif
+
+PlasmaLnfJob::PlasmaLnfJob( const QString& lnfPath, const QString& id )
+    : m_lnfPath( lnfPath )
+    , m_id( id )
+{
+}
+
+PlasmaLnfJob::~PlasmaLnfJob() {}
+
+QString
+PlasmaLnfJob::prettyName() const
+{
+    return tr( "Applying Plasma Look-and-Feel…", "@status" );
+}
+
+ClaudeInstall::JobResult
+PlasmaLnfJob::exec()
+{
+    auto* system = ClaudeInstall::System::instance();
+    auto* gs = ClaudeInstall::JobQueue::instance()->globalStorage();
+
+    QStringList command( { "sudo",
+                           "-E",
+                           "-H",
+                           "-u",
+                           gs->value( "username" ).toString(),
+                           m_lnfPath,
+                           "-platform",
+                           "minimal",
+                           "--resetLayout",
+                           "--apply",
+                           m_id } );
+
+    int r = system->targetEnvCall( command );
+    if ( r )
+    {
+        return ClaudeInstall::JobResult::error( tr( "Could not select KDE Plasma Look-and-Feel package" ),
+                                            tr( "Could not select KDE Plasma Look-and-Feel package" ) );
+    }
+
+#ifdef WITH_KCONFIG
+    // This is a workaround for lookandfeeltool **not** writing
+    // the LookAndFeelPackage key in kdeglobals; this happens
+    // with the lnftool and Plasma 5.20 (possibly other combinations
+    // as well).
+    QString targetConfig = system->targetPath( "/home/" + gs->value( "username" ).toString() + "/.config/kdeglobals" );
+    KConfigGroup cg( KSharedConfig::openConfig( targetConfig ), "KDE" );
+    cg.writeEntry( "LookAndFeelPackage", m_id );
+#endif
+
+    return ClaudeInstall::JobResult::ok();
+}
