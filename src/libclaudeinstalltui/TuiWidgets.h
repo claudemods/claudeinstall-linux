@@ -44,6 +44,19 @@ str( const QString& s )
     return s.toStdString();
 }
 
+/** @brief Is this a plain Linux console (TERM=linux) or a terminal that is not UTF-8?
+ *
+ * There the font has few glyphs: use ASCII symbols and Latin text only
+ * (see symbol() and drawableOnConsole()). In a terminal emulator it is @c false.
+ */
+TUIDLLEXPORT bool isConsole();
+
+/// @brief A status symbol with spaces around it: a check mark, a cross or an exclamation mark (ASCII on the console)
+TUIDLLEXPORT std::string symbol( bool ok, bool warning = false );
+
+/// @brief Can the Linux console font show @p s? (Latin scripts only)
+TUIDLLEXPORT bool drawableOnConsole( const QString& s );
+
 /** @brief Turns the little HTML that messages contain into plain text
  *
  * Line breaks (`<br/>`) and the ends of list items and paragraphs become

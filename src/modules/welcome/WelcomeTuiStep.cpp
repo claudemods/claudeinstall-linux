@@ -9,8 +9,12 @@
 
 #include "WelcomeTuiStep.h"
 
+#include "BrandingInfo.h"
 #include "ModuleLoadState.h"
+#include "TuiWidgets.h"
 #include "modulesystem/RequirementsModel.h"
+
+#include <algorithm>
 
 #include <ftxui/component/component_options.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -89,30 +93,51 @@ WelcomeTuiStep::checkRequirements()
 ftxui::Component
 WelcomeTuiStep::createComponent()
 {
-    // The menu of languages; its entries are the names the Config knows
+    // The menu of languages; its entries are the names the Config knows.
+    // On the Linux console only the names its font can draw (Latin scripts) are listed.
     auto* languages = m_config->languagesModel();
     m_languageNames.clear();
+    m_languageRows.clear();
     for ( int i = 0; i < languages->rowCount( QModelIndex() ); ++i )
     {
-        m_languageNames.push_back(
-            languages->data( languages->index( i ), ClaudeInstall::Locale::TranslationsModel::LabelRole ).toString().toStdString() );
+        const QString label
+            = languages->data( languages->index( i ), ClaudeInstall::Locale::TranslationsModel::LabelRole ).toString();
+        if ( ClaudeInstall::Tui::isConsole() && i != m_config->localeIndex() && !ClaudeInstall::Tui::drawableOnConsole( label ) )
+        {
+            continue;
+        }
+        m_languageNames.push_back( label.toStdString() );
+        m_languageRows.push_back( i );
     }
-    m_languageSelected = m_config->localeIndex();
+    auto positionOf = [ this ]( int row )
+    {
+        const auto it = std::find( m_languageRows.begin(), m_languageRows.end(), row );
+        return it == m_languageRows.end() ? 0 : int( it - m_languageRows.begin() );
+    };
+    m_languageSelected = positionOf( m_config->localeIndex() );
 
     ftxui::MenuOption option = ftxui::MenuOption::Vertical();
-    option.on_change = [ this ] { m_config->setLocaleIndex( m_languageSelected ); };
+    option.on_change = [ this ]
+    {
+        if ( m_languageSelected >= 0 && m_languageSelected < int( m_languageRows.size() ) )
+        {
+            m_config->setLocaleIndex( m_languageRows[ m_languageSelected ] );
+        }
+    };
     auto menu = ftxui::Menu( &m_languageNames, &m_languageSelected, option );
 
     return ftxui::Renderer(
         menu,
-        [ this, menu ]
+        [ this, menu, positionOf ]
         {
             using namespace ftxui;
 
             // The language may be changed from elsewhere (e.g. by a location lookup)
-            if ( m_config->localeIndex() != m_languageSelected )
+            const int wanted = positionOf( m_config->localeIndex() );
+            if ( m_languageSelected < 0 || m_languageSelected >= int( m_languageRows.size() )
+                 || m_languageRows[ m_languageSelected ] != m_config->localeIndex() )
             {
-                m_languageSelected = m_config->localeIndex();
+                m_languageSelected = wanted;
             }
 
             Elements problems;
@@ -129,26 +154,33 @@ WelcomeTuiStep::createComponent()
                     const bool mandatory = requirements->data( index, ClaudeInstall::RequirementsModel::Mandatory ).toBool();
                     const std::string message
                         = requirements->data( index, ClaudeInstall::RequirementsModel::NegatedText ).toString().toStdString();
-                    Element line = hbox( { text( mandatory ? " ✗ " : " ! " ), paragraph( message ) } );
+                    Element line = hbox( { text( ClaudeInstall::Tui::symbol( false, !mandatory ) ), paragraph( message ) } );
                     problems.push_back( mandatory ? ( line | color( Color::Red ) ) : ( line | color( Color::Yellow ) ) );
                 }
             }
             if ( problems.empty() )
             {
                 const bool checked = requirements && requirements->satisfiedRequirements();
-                problems.push_back( text( checked ? tr( " ✓ This computer satisfies the requirements.", "@label" ).toStdString()
-                                                  : tr( " Checking the requirements…", "@label" ).toStdString() )
+                problems.push_back( text( checked ? ClaudeInstall::Tui::symbol( true )
+                                                        + tr( "This computer satisfies the requirements.", "@label" ).toStdString()
+                                                  : " " + tr( "Checking the requirements...", "@label" ).toStdString() )
                                     | dim );
             }
 
-            return hbox( { vbox( { paragraph( m_config->genericWelcomeMessage().toStdString() ),
-                                   separator(),
-                                   text( tr( "Requirements", "@title" ).toStdString() ) | bold,
-                                   vbox( problems ) } )
-                               | flex,
+            // The message is a template with HTML ("<h1>Welcome to the %1 installer</h1>")
+            const QString product = ClaudeInstall::BrandingInfo::instance().versionedName();
+            const QString welcome
+                = ClaudeInstall::Tui::stripMarkup( m_config->genericWelcomeMessage().arg( product ) ).trimmed();
+
+            // One column, top to bottom: the greeting, what is wrong (if anything), and then
+            // the language list using the whole width and the rest of the height.
+            // The list is the only thing to operate here, so it always has the keyboard focus.
+            return vbox( { paragraph( welcome.toStdString() ) | bold,
                            separator(),
-                           vbox( { text( tr( "Language", "@title" ).toStdString() ) | bold,
-                                   menu->Render() | vscroll_indicator | frame | flex } )
-                               | size( WIDTH, EQUAL, 30 ) } );
+                           vbox( problems ),
+                           separator(),
+                           text( " " + tr( "Choose your language (Up / Down, then Ctrl-N for Next)", "@title" ).toStdString() )
+                               | bold,
+                           menu->Render() | vscroll_indicator | frame | flex } );
         } );
 }

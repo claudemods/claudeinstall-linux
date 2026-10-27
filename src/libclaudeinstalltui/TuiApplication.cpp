@@ -186,7 +186,10 @@ TuiApplication::handleEvent( const ftxui::Event& event )
         return true;  // the question takes all keys
     }
 
-    if ( event == Event::F1 )
+    // The Linux console has no mouse, and its function keys send sequences that are
+    // easy to lose (F1-F5 are ESC [ [ A..E), so every action also has a plain key:
+    // Ctrl-B back, Ctrl-N next, Esc cancel.
+    if ( event == Event::F1 || event == Event::Special( "\x02" ) || event == Event::Special( "\x1B[[A" ) )
     {
         if ( m_wizard->backAndNextVisible() && m_wizard->backEnabled() )
         {
@@ -194,7 +197,7 @@ TuiApplication::handleEvent( const ftxui::Event& event )
         }
         return true;
     }
-    if ( event == Event::F2 )
+    if ( event == Event::F2 || event == Event::Special( "\x0E" ) || event == Event::Special( "\x1B[[B" ) )
     {
         if ( m_wizard->backAndNextVisible() && m_wizard->nextEnabled() )
         {
@@ -202,7 +205,7 @@ TuiApplication::handleEvent( const ftxui::Event& event )
         }
         return true;
     }
-    if ( event == Event::F10 )
+    if ( event == Event::F10 || event == Event::Escape )
     {
         if ( m_wizard->quitEnabled() )
         {
@@ -244,12 +247,12 @@ TuiApplication::render()
     Elements footer;
     if ( m_wizard->backAndNextVisible() )
     {
-        footer.push_back( key( "F1", m_wizard->backLabel(), m_wizard->backEnabled() ) );
-        footer.push_back( key( "F2", m_wizard->nextLabel(), m_wizard->nextEnabled() ) );
+        footer.push_back( key( "F1/Ctrl-B", m_wizard->backLabel(), m_wizard->backEnabled() ) );
+        footer.push_back( key( "F2/Ctrl-N", m_wizard->nextLabel(), m_wizard->nextEnabled() ) );
     }
     if ( m_wizard->quitVisible() )
     {
-        footer.push_back( key( "F10", m_wizard->quitLabel(), m_wizard->quitEnabled() ) );
+        footer.push_back( key( "F10/Esc", m_wizard->quitLabel(), m_wizard->quitEnabled() ) );
     }
 
     Element page = m_stepCount > 0 ? m_pages->Render() : text( "" );
@@ -260,7 +263,12 @@ TuiApplication::render()
                                    page | flex | border } )
                                | flex,
                            separator(),
-                           hbox( footer ) } );
+                           hbox( footer ),
+                           text( " " + tr( "Keyboard only: Tab / Shift-Tab change field, Up / Down choose, Enter / Space select, "
+                                           "PgUp / PgDn scroll",
+                                           "@label" )
+                                          .toStdString() )
+                               | dim } );
 
     const QString message = !m_failure.isEmpty() ? m_failure : m_question;
     if ( !message.isEmpty() )

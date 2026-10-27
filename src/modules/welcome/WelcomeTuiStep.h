@@ -56,6 +56,7 @@ private:
     Config* m_config;
 
     std::vector< std::string > m_languageNames;
+    std::vector< int > m_languageRows;  ///< model row of each entry of m_languageNames
     int m_languageSelected = 0;
 };
 

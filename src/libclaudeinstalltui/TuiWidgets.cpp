@@ -16,12 +16,62 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 
 namespace ClaudeInstall
 {
 namespace Tui
 {
+
+bool
+isConsole()
+{
+    static const bool console = []
+    {
+        const char* term = std::getenv( "TERM" );
+        if ( term && std::strcmp( term, "linux" ) == 0 )
+        {
+            return true;
+        }
+        const char* vars[] = { "LC_ALL", "LC_CTYPE", "LANG" };
+        for ( const char* name : vars )
+        {
+            const char* value = std::getenv( name );
+            if ( value && *value )
+            {
+                const QString v = QString::fromLocal8Bit( value ).toLower();
+                return !( v.contains( QStringLiteral( "utf-8" ) ) || v.contains( QStringLiteral( "utf8" ) ) );
+            }
+        }
+        return false;
+    }();
+    return console;
+}
+
+std::string
+symbol( bool ok, bool warning )
+{
+    if ( isConsole() )
+    {
+        return ok ? " [ok] " : ( warning ? " [!] " : " [X] " );
+    }
+    return ok ? " ✓ " : ( warning ? " ! " : " ✗ " );
+}
+
+bool
+drawableOnConsole( const QString& s )
+{
+    for ( const QChar c : s )
+    {
+        if ( c.unicode() > 0x024F )
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 QString
 stripMarkup( const QString& s )
