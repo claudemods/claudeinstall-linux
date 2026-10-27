@@ -18,7 +18,8 @@ can customise it through branding and configuration without patching the code.
     created and no packages are installed; existing accounts carry over. A fresh machine-id,
     `fstab` and bootloader are still set up for the copy.
 
-> **Status:** the code has not been compiled yet. Expect compile errors on the first build.
+> **Status:** the first builds on Linux (Arch/CachyOS, Qt6) are in progress; compile errors
+> are being fixed as they appear, so expect more.
 > See [BUILDING.md](BUILDING.md) for where to look. Test only in a virtual machine: the
 > partition and bootloader steps change the disk.
 
@@ -34,6 +35,28 @@ can customise it through branding and configuration without patching the code.
 Gentoo, Void), installs the build dependencies, builds with CMake/Ninja, and can install the
 result or wrap it into a package. Run `./build.sh --help` for all options.
 
+`build.sh` also repairs a partly copied source tree before building (for example partition
+files that landed in `src/modules/`), keeps going after a failed file, and writes every compile
+error to `build/errors.log` (full output in `build/build.log`).
+
+## Look and colours
+
+The default branding (`src/branding/default`) uses a 1100×520 window with a horizontal
+progress bar along the bottom, the `mascot.png` logo, and the stock ClaudeInstall colours and
+images.
+
+Change the sidebar colours at any time with the `claudeinstall-colors` command (installed to
+`/usr/bin` by `./build.sh --install`; run it with sudo for the system-wide install):
+
+```bash
+sudo claudeinstall-colors default       # stock colours
+sudo claudeinstall-colors claudemods    # blue bar (#00568f), cyan text (#24ffff)
+sudo claudeinstall-colors custom "#00568f" "#24ffff" "#00568f" "#24ffff"   # bg, text, current bg, current text
+claudeinstall-colors show               # print the colours in use
+```
+
+It edits the `style:` section of the installed `branding.desc`.
+
 ## Configuration
 
 | File | Purpose |
@@ -42,7 +65,8 @@ result or wrap it into a package. Run `./build.sh --help` for all options.
 | `settings-clone.conf` | Module sequence for cloning the running system |
 | `unpackfs-clone.conf` | What to copy (and exclude) when cloning |
 | `src/modules/<name>/<name>.conf` | Per-module settings |
-| `src/branding/` | Branding: logos, slideshow, strings |
+| `src/branding/` | Branding: logos, slideshow, strings, sidebar layout |
+| `claudeinstall-colors` | Command to switch the sidebar colours |
 
 `build.sh --install` puts the configuration for the chosen mode at
 `/etc/claudeinstall/settings.conf`.
