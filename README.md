@@ -47,6 +47,7 @@ can customise it through branding and configuration without patching the code.
 ./build.sh                       # asks: new system or clone? GUI, TUI or both?
 ./build.sh --clone --gui --install
 ./build.sh --new --tui --package
+./build.sh --claudemodsdistrosonline --gui     # claudemods distributions (see below); or --tui / --both
 ```
 
 `build.sh` detects your distribution, installs the build dependencies, builds with
@@ -76,6 +77,53 @@ supports `pacman`, `apt`, `dnf`, `dnf5`, `yum`, `zypp`, `apk`, `portage`, `entro
 `build.sh` also repairs a partly copied source tree before building (for example partition
 files that landed in `src/modules/`), keeps going after a failed file, and writes every compile
 error to `build/errors.log` (full output in `build/build.log`).
+
+## claudemods distributions (online install)
+
+`./build.sh --claudemodsdistrosonline` (alias `--distro`) builds an installer that sets systems
+up the way the old claudemods scripts did: pick a distribution on the **Distribution** page
+(GUI and TUI), and the system is bootstrapped with `pacstrap` and customised. Locale, keyboard,
+partitioning, users, fstab, initramfs and the bootloader use the regular ClaudeInstall modules.
+
+- `src/modules/distroprofile` – the job module, used twice in `settings-distro.conf`:
+  `distroprofile@install` (replaces `unpackfs`) and `distroprofile@customize` (after `users`).
+- `profiles/*.conf` – one small file per variant (Spitfire / Apex, minimal / full / black, dev).
+  They `extends:` a family file and `claudemods-common.conf`, which holds the shared steps. Step
+  types: `copy`, `mkdir`, `remove`, `enable`, `run`, `runAsUser`, `hostRun`, `download`, `regdom`.
+- `needed-files/` – your grub / plymouth / SDDM themes, `pacman.conf`, `pacman.d.zip`, tweak
+  scripts. **Not included**: add the folder next to `build.sh`; it is installed to
+  `/usr/share/claudeinstall/needed-files`.
+- `download` steps must give a `sha256` (or `insecure: true`); the claudemods zips are currently
+  unpinned.
+- Wireless regulatory domain: set `wirelessRegdom: GB` in `distroprofile.conf`, or leave it empty
+  to use the country of the chosen time zone.
+
+Runtime needs: `arch-install-scripts`, `curl`, `unzip`. Not yet ported: the CachyOS, Arch and
+handheld installers.
+
+## Package lists that change over time
+
+Package lists go stale (renamed, split or dropped packages, 404s). Three layers handle it:
+
+1. The `packages` module refreshes the lists and retries when an install fails, for apt, pacman,
+   dnf, dnf5, yum, zypp, apk, xbps and entropy.
+2. Packages that the manager reports as no longer existing are skipped and logged; the rest
+   still install. `distroprofile` does the same for `pacstrap`.
+3. `claudeinstall-pkgfix` (installed to `/usr/bin`) works on the command line: `refresh`,
+   `extract` a list from a meta-package `.pkg.tar.zst`, `resolve` names against the live
+   repositories (following renames), and `pacstrap` / `install` with retries. Skipped names go to
+   `/tmp/claudeinstall-missing.txt`.
+
+## Filesystems
+
+All filesystems the backend can create are offered by default in the GUI and TUI (default first).
+`availableFileSystemTypes` in `partition.conf` is `["all"]`; give a list to restrict it, or use
+`claudeconfig fs available all|btrfs,ext4,...`.
+
+## C++ standard
+
+CMake uses the newest standard the compiler supports (C++23 with GCC 13+ / Clang 17+, else 20,
+else 17). Force one with `-DCLAUDEINSTALL_CXX_STANDARD=17|20|23`. The code needs only C++17.
 
 ## Look and colours
 
