@@ -215,8 +215,9 @@ UnpackFSJob::doCount( UnpackEntry& entry ) const
     {
         countLines( { "unsquashfs", "-l", entry.source } );
     }
-    else if ( entry.sourcefs == "ext4" )
+    else if ( entry.sourcefs == "ext4" || entry.sourcefs == "erofs" )
     {
+        // Both are mounted (loop) and copied with rsync, so count the mounted files
         countLines( { "find", entry.mountPoint, "-type", "f" } );
     }
     else if ( entry.isFile() )

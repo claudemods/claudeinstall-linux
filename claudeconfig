@@ -1,0 +1,338 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: no
+# SPDX-License-Identifier: CC0-1.0
+#
+# claudeconfig - configure the installer for your distro.
+#
+# Edits /etc/claudeinstall/settings.conf and /etc/claudeinstall/modules/*.conf
+# (a module file is first copied from /usr/share/claudeinstall/modules if it is not
+# in /etc yet). The previous version of each changed file is kept as FILE.bak.
+# Run as root. Environment: CLAUDECONFIG_DIR (default /etc/claudeinstall),
+# CLAUDECONFIG_SHARE (default /usr/share/claudeinstall).
+#
+#   claudeconfig show                          what is set now
+#   claudeconfig preset claudemods             install the claudemods configuration set
+#   claudeconfig mode clone|new                clone the live system (no users) or a new-system install
+#   claudeconfig branding NAME                 branding component
+#   claudeconfig prompt on|off                 "are you sure?" before installing
+#
+#   claudeconfig image squashfs|erofs [SOURCE] live image format (and path) to unpack
+#   claudeconfig image show | tools            current image / are the tools + kernel support there
+#
+#   claudeconfig fs default btrfs|ext4|f2fs|xfs     default filesystem
+#   claudeconfig fs available btrfs,ext4,f2fs,xfs   filesystems offered
+#   claudeconfig swap CHOICES                  e.g. none,small,suspend,file
+#   claudeconfig swap initial none|small|suspend|file
+#   claudeconfig partition initial erase|alongside|replace|manual
+#   claudeconfig efi-mount /boot/efi
+#
+#   claudeconfig btrfs compress zstd:22|zstd:3|lzo|zlib|off
+#   claudeconfig btrfs options defaults,noatime,compress=zstd:3   (replace all btrfs mount options)
+#   claudeconfig btrfs ssd discard=async|off   extra options on SSDs
+#   claudeconfig btrfs hdd autodefrag|off      extra options on HDDs
+#   claudeconfig btrfs swap-subvol /@swap
+#   claudeconfig btrfs subvols default|minimal|none|list
+#   claudeconfig btrfs subvols add MOUNTPOINT SUBVOLUME
+#   claudeconfig btrfs subvols remove MOUNTPOINT
+#
+#   claudeconfig kernel linux-cachyos          kernel for the initramfs (initcpio)
+#   claudeconfig bootloader grub|systemd-boot|refind
+#   claudeconfig bootloader efi-fallback true|false
+#   claudeconfig bootloader kernel-path /usr/lib/modules
+#
+#   claudeconfig service enable|disable|mask|unmask NAME [mandatory]
+#   claudeconfig service set-default graphical.target
+#   claudeconfig service remove NAME | list
+#
+#   claudeconfig user shell /usr/bin/zsh | autologin on|off | root-password on|off
+#   claudeconfig user groups lp,network,wheel | sudo-group wheel
+#   claudeconfig check storage 7.9 | ram 1.0   minimum disk (GiB) / memory (GiB)
+#   claudeconfig internet-url https://example.org
+#   claudeconfig finish restart on|off | checked on|off | command "systemctl reboot"
+#   claudeconfig displaymanager order sddm,lightdm | basic on|off
+
+CONF=${CLAUDECONFIG_DIR:-/etc/claudeinstall}
+SHARE=${CLAUDECONFIG_SHARE:-/usr/share/claudeinstall}
+PRESETS=${CLAUDECONFIG_PRESETS:-$SHARE/presets}
+
+die() { echo "claudeconfig: $*" >&2; exit 1; }
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+
+mod() { # mod NAME -> path of the (writable) module config
+  _f="$CONF/modules/$1.conf"
+  if [ ! -f "$_f" ]; then
+    [ -f "$SHARE/modules/$1.conf" ] || die "no $1.conf in $CONF/modules or $SHARE/modules"
+    mkdir -p "$CONF/modules" && cp "$SHARE/modules/$1.conf" "$_f" || die "cannot write $_f (run as root)"
+  fi
+  echo "$_f"
+}
+settings() { [ -f "$CONF/settings.conf" ] || { mkdir -p "$CONF" && cp "$SHARE/settings.conf" "$CONF/settings.conf"; } || die "no settings.conf"; echo "$CONF/settings.conf"; }
+backup() { [ -f "$1.bak" ] || cp "$1" "$1.bak"; }
+onoff() { case $1 in on|true|yes|1) echo true ;; off|false|no|0) echo false ;; *) die "expected on|off, got '$1'" ;; esac; }
+yamlq() { printf '"%s"' "$1"; }
+flow() { # a,b,c -> [ a, b, c ]   (flow=quoted -> ["a","b"])
+  _l=$(echo "$1" | sed 's/,/, /g'); echo "[ $_l ]"; }
+
+setkey() { # setkey FILE KEY VALUE   (top-level key)
+  backup "$1"
+  if grep -Eq "^$2:" "$1"; then
+    awk -v k="$2" -v v="$3" '$0 ~ "^" k ":" { print k ": " v; next } { print }' "$1" > "$1.new" && mv "$1.new" "$1"
+  else printf '%s: %s\n' "$2" "$3" >> "$1"; fi
+}
+setnested() { # setnested FILE KEY VALUE   (first uncommented "KEY:" at any indent)
+  backup "$1"
+  grep -Eq "^[[:space:]]*-?[[:space:]]*$2:" "$1" || die "key '$2' not found in $1"
+  awk -v k="$2" -v v="$3" '
+    !d && $0 !~ /^[[:space:]]*#/ && $0 ~ "^[[:space:]]*-?[[:space:]]*" k ":" {
+      match($0, /^[[:space:]]*(-[[:space:]]*)?/); printf "%s%s: %s\n", substr($0, 1, RLENGTH), k, v; d = 1; next }
+    { print }' "$1" > "$1.new" && mv "$1.new" "$1"
+}
+setblock() { # setblock FILE KEY NEWTEXTFILE  -> replace "KEY:" and its indented body
+  backup "$1"
+  awk -v k="$2" -v nf="$3" '
+    $0 ~ "^" k ":" { while ((getline l < nf) > 0) print l; skip = 1; next }
+    skip && $0 ~ /^[^[:space:]]/ { skip = 0 }
+    skip { next }
+    { print }' "$1" > "$1.new" && mv "$1.new" "$1"
+}
+listblock() { # listblock KEY a,b,c -> temp file with "KEY:\n    - a\n..."
+  _t=$(mktemp); printf '%s:\n' "$1" > "$_t"
+  echo "$2" | tr ',' '\n' | while read -r _i; do [ -n "$_i" ] && printf '    - %s\n' "$_i" >> "$_t"; done
+  echo "$_t"
+}
+
+fsopt() { # fsopt FILE FS KEY VALUE|__DEL__   (a key of one mountOptions entry)
+  backup "$1"
+  grep -Eq "filesystem:[[:space:]]*$2[[:space:]]*$" "$1" || printf '    - filesystem: %s\n      options: [ defaults ]\n' "$2" >> "$1"
+  awk -v fs="$2" -v key="$3" -v val="$4" '
+    function leave() { if (inblk && !done && val != "__DEL__") printf "      %s: %s\n", key, val; inblk = 0 }
+    /^[[:space:]]*#/ { print; next }
+    /^[^[:space:]]/ { leave(); print; next }
+    /^[[:space:]]*-[[:space:]]*filesystem:/ { leave(); inblk = ($0 ~ ("filesystem:[[:space:]]*" fs "[[:space:]]*$")); done = 0; print; next }
+    inblk && $0 ~ ("^[[:space:]]+" key ":") { if (val != "__DEL__") printf "      %s: %s\n", key, val; done = 1; next }
+    { print }
+    END { leave() }' "$1" > "$1.new" && mv "$1.new" "$1"
+}
+
+subvol_block() { # subvol_block default|minimal|none -> file
+  _t=$(mktemp)
+  case $1 in
+    default) cat > "$_t" <<'EOF'
+btrfsSubvolumes:
+    - mountPoint: /
+      subvolume: /@
+    - mountPoint: /root
+      subvolume: /@root
+    - mountPoint: /home
+      subvolume: /@home
+    - mountPoint: /srv
+      subvolume: /@srv
+    - mountPoint: /var/cache
+      subvolume: /@cache
+    - mountPoint: /tmp
+      subvolume: /@tmp
+    - mountPoint: /var/log
+      subvolume: /@log
+    - mountPoint: /var/lib/portables
+      subvolume: /@var/lib/portables
+    - mountPoint: /var/lib/machines
+      subvolume: /@var/lib/machines
+
+EOF
+    ;;
+    minimal) cat > "$_t" <<'EOF'
+btrfsSubvolumes:
+    - mountPoint: /
+      subvolume: /@
+    - mountPoint: /home
+      subvolume: /@home
+
+EOF
+    ;;
+    none) cat > "$_t" <<'EOF'
+btrfsSubvolumes:
+    - mountPoint: /
+      subvolume: ""
+
+EOF
+    ;;
+    *) die "subvols: default|minimal|none|list|add|remove" ;;
+  esac
+  echo "$_t"
+}
+
+svc() { # svc FILE NAME ACTION MANDATORY
+  _f=$1
+  backup "$_f"
+  sed -i -E 's/^units:[[:space:]]*\[[[:space:]]*\][[:space:]]*$/units:/' "$_f"
+  grep -Eq '^units:' "$_f" || echo 'units:' >> "$_f"
+  if grep -Eq "^[[:space:]]*-[[:space:]]*name:[[:space:]]*\"?$2\"?[[:space:]]*$" "$_f"; then
+    awk -v n="$2" -v a="$3" -v m="$4" '
+      /^[[:space:]]*-[[:space:]]*name:/ { inb = ($0 ~ ("name:[[:space:]]*\"?" n "\"?[[:space:]]*$")) }
+      inb && /^[[:space:]]+action:/ { print "      action: \"" a "\""; next }
+      inb && /^[[:space:]]+mandatory:/ && m != "" { print "      mandatory: " m; next }
+      { print }' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+  else
+    printf '    - name: "%s"\n      action: "%s"\n      mandatory: %s\n' "$2" "$3" "${4:-false}" >> "$_f"
+  fi
+}
+
+[ $# -ge 1 ] || usage 1
+cmd=$1; shift
+
+case $cmd in
+  -h|--help|help) usage 0 ;;
+
+  show)
+    s=$(settings 2>/dev/null)
+    echo "== $CONF"
+    [ -n "$s" ] && { grep -Eq '^[[:space:]]*-[[:space:]]*users[[:space:]]*$' "$s" && echo "mode:       new system (users module on)" || echo "mode:       clone (no users module)"
+                     grep -E '^(branding|prompt-install):' "$s"; }
+    f=$CONF/modules/unpackfs.conf; [ -f "$f" ] && grep -E '^[[:space:]]*-?[[:space:]]*(source|sourcefs):' "$f" | sed 's/^/image:      /'
+    f=$CONF/modules/partition.conf; [ -f "$f" ] && grep -E '^(defaultFileSystemType|availableFileSystemTypes|initialPartitioningChoice|initialSwapChoice|efiSystemPartition):' "$f" | sed 's/^/partition:  /'
+    f=$CONF/modules/mount.conf; [ -f "$f" ] && { grep -E '^[[:space:]]*(- mountPoint|subvolume):|filesystem: btrfs|compress=|btrfsSwapSubvol' "$f" | grep -v '^[[:space:]]*#' | sed 's/^/mount:      /'; }
+    f=$CONF/modules/initcpio.conf; [ -f "$f" ] && grep -E '^kernel:' "$f" | sed 's/^/initcpio:   /'
+    f=$CONF/modules/services-systemd.conf; [ -f "$f" ] && { echo "services:   $(grep -Ec '^[[:space:]]*-[[:space:]]*name:' "$f") unit(s)"; }
+    ;;
+
+  preset)
+    p=$PRESETS/${1:?preset name}
+    [ -d "$p" ] || die "no preset '$1' in $PRESETS"
+    b="$CONF/backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$b" "$CONF/modules" || die "cannot write $CONF (run as root)"
+    [ -f "$CONF/settings.conf" ] && cp "$CONF/settings.conf" "$b/"
+    [ -d "$CONF/modules" ] && cp -a "$CONF/modules" "$b/" 2>/dev/null
+    cp "$p/settings.conf" "$CONF/settings.conf" && cp "$p"/modules/*.conf "$CONF/modules/" || die "copy failed"
+    echo "Preset '$1' installed in $CONF (old files saved in $b)" ;;
+
+  mode)
+    f=$(settings); backup "$f"
+    case $1 in
+      clone) sed -i -E 's/^([[:space:]]*)-[[:space:]]*users[[:space:]]*$/\1# users/' "$f" ;;
+      new)   sed -i -E 's/^([[:space:]]*)#[[:space:]]*users[[:space:]]*$/\1- users/' "$f" ;;
+      *) die "mode clone|new" ;;
+    esac
+    echo "mode: $1" ;;
+  branding) f=$(settings); setkey "$f" branding "${1:?name}" ;;
+  prompt)   f=$(settings); setkey "$f" prompt-install "$(onoff "$1")" ;;
+
+  image)
+    f=$(mod unpackfs)
+    case $1 in
+      squashfs|erofs)
+        setnested "$f" sourcefs "\"$1\""
+        [ -n "$2" ] && setnested "$f" source "\"$2\""
+        echo "image: $1 ${2:+($2)}"
+        [ "$1" = squashfs ] && ! command -v unsquashfs >/dev/null 2>&1 && echo "note: unsquashfs (squashfs-tools) is not installed"
+        [ "$1" = erofs ] && ! grep -qw erofs /proc/filesystems && ! modprobe -n erofs >/dev/null 2>&1 && echo "note: this kernel has no erofs support"
+        ;;
+      show) grep -E '^[[:space:]]*-?[[:space:]]*(source|sourcefs|destination):' "$f" ;;
+      tools)
+        command -v unsquashfs >/dev/null 2>&1 && echo "squashfs: unsquashfs found" || echo "squashfs: unsquashfs MISSING (squashfs-tools)"
+        if grep -qw erofs /proc/filesystems; then echo "erofs:    kernel support loaded"
+        elif modprobe -n erofs >/dev/null 2>&1; then echo "erofs:    kernel module available (modprobe erofs)"
+        else echo "erofs:    NO kernel support"; fi ;;
+      *) die "image squashfs|erofs [SOURCE] | show | tools" ;;
+    esac ;;
+
+  fs)
+    f=$(mod partition)
+    case $1 in
+      default) case $2 in btrfs|ext4|f2fs|xfs|zfs|ext3|ext2|reiser|jfs) ;; *) die "unknown filesystem '$2'" ;; esac
+               setkey "$f" defaultFileSystemType "\"$2\""
+               grep -E '^availableFileSystemTypes:' "$f" | grep -q "\"$2\"" || echo "note: $2 is not in availableFileSystemTypes (claudeconfig fs available ...)" ;;
+      available) l=$(echo "$2" | sed 's/[^,]\+/"&"/g'); setkey "$f" availableFileSystemTypes "[$l]" ;;
+      *) die "fs default FS | available a,b,c" ;;
+    esac ;;
+  swap)
+    f=$(mod partition)
+    if [ "$1" = initial ]; then setkey "$f" initialSwapChoice "$2"
+    else t=$(listblock userSwapChoices "$1"); setblock "$f" userSwapChoices "$t"; rm -f "$t"; fi ;;
+  partition)
+    [ "$1" = initial ] || die "partition initial erase|alongside|replace|manual"
+    f=$(mod partition); setkey "$f" initialPartitioningChoice "$2" ;;
+  efi-mount) f=$(mod partition); setkey "$f" efiSystemPartition "\"${1:?path}\"" ;;
+
+  btrfs)
+    f=$(mod mount); sub=$1; shift
+    case $sub in
+      compress)
+        case $1 in off|none) o="[ defaults ]" ;; *) o="[ defaults, compress=$1 ]" ;; esac
+        fsopt "$f" btrfs options "$o" ;;
+      options) fsopt "$f" btrfs options "$(flow "$1")" ;;
+      ssd) [ "$1" = off ] && fsopt "$f" btrfs ssdOptions __DEL__ || fsopt "$f" btrfs ssdOptions "$(flow "$1")" ;;
+      hdd) [ "$1" = off ] && fsopt "$f" btrfs hddOptions __DEL__ || fsopt "$f" btrfs hddOptions "$(flow "$1")" ;;
+      swap-subvol) setkey "$f" btrfsSwapSubvol "${1:?name}" ;;
+      subvols)
+        case $1 in
+          list) awk '/^btrfsSubvolumes:/{on=1;next} on&&/^[^[:space:]]/{on=0} on&&/mountPoint:|subvolume:/' "$f" ;;
+          add) [ -n "$2" ] && [ -n "$3" ] || die "subvols add MOUNTPOINT SUBVOLUME"
+               backup "$f"; awk -v mp="$2" -v sv="$3" '{print} /^btrfsSubvolumes:/{printf "    - mountPoint: %s\n      subvolume: %s\n", mp, sv}' "$f" > "$f.new" && mv "$f.new" "$f" ;;
+          remove) [ -n "$2" ] || die "subvols remove MOUNTPOINT"
+               backup "$f"; awk -v mp="$2" '
+                 /^btrfsSubvolumes:/ {on=1; print; next}
+                 on && /^[^[:space:]]/ {on=0}
+                 on && /^[[:space:]]*-[[:space:]]*mountPoint:/ { skip = ($0 ~ ("mountPoint:[[:space:]]*" mp "[[:space:]]*$")) }
+                 on && skip && /^[[:space:]]+[a-zA-Z#]/ && !/mountPoint:/ { next }
+                 on && skip && /mountPoint:/ { next }
+                 { print }' "$f" > "$f.new" && mv "$f.new" "$f" ;;
+          *) t=$(subvol_block "$1"); setblock "$f" btrfsSubvolumes "$t"; rm -f "$t" ;;
+        esac ;;
+      *) die "btrfs compress|options|ssd|hdd|swap-subvol|subvols" ;;
+    esac ;;
+
+  kernel) f=$(mod initcpio); setkey "$f" kernel "${1:?kernel name, e.g. linux-cachyos}" ;;
+  bootloader)
+    f=$(mod bootloader); sub=$1; shift
+    case $sub in
+      grub|systemd-boot|refind) setkey "$f" efiBootLoader "\"$sub\"" ;;
+      efi-fallback) setkey "$f" installEFIFallback "$(onoff "$1")" ;;
+      kernel-path) setkey "$f" kernelSearchPath "\"${1:?path}\"" ;;
+      *) die "bootloader grub|systemd-boot|refind | efi-fallback true|false | kernel-path PATH" ;;
+    esac ;;
+
+  service)
+    f=$(mod services-systemd); sub=$1; shift
+    case $sub in
+      enable|disable|mask|unmask) svc "$f" "${1:?unit}" "$sub" "$( [ "$2" = mandatory ] && echo true || echo false )" ;;
+      set-default) svc "$f" "${1:?target}" set-default true ;;
+      remove) backup "$f"; awk -v n="$1" '
+                /^[[:space:]]*-[[:space:]]*name:/ { skip = ($0 ~ ("name:[[:space:]]*\"?" n "\"?[[:space:]]*$")) }
+                skip && (/^[[:space:]]+(action|mandatory):/ || /name:/) { next }
+                { skip = 0 } 1' "$f" > "$f.new" && mv "$f.new" "$f" ;;
+      list) grep -E '^[[:space:]]*(-[[:space:]]*name|action|mandatory):' "$f" ;;
+      *) die "service enable|disable|mask|unmask NAME [mandatory] | set-default T | remove NAME | list" ;;
+    esac ;;
+
+  user)
+    f=$(mod users); sub=$1; shift
+    case $sub in
+      shell) setnested "$f" shell "${1:?shell}" ;;
+      autologin) setkey "$f" doAutologin "$(onoff "$1")" ;;
+      root-password) setkey "$f" setRootPassword "$(onoff "$1")" ;;
+      sudo-group) setkey "$f" sudoersGroup "${1:?group}" ;;
+      groups) t=$(listblock defaultGroups "$1"); setblock "$f" defaultGroups "$t"; rm -f "$t" ;;
+      *) die "user shell|autologin|root-password|sudo-group|groups" ;;
+    esac ;;
+  check)
+    f=$(mod welcome)
+    case $1 in storage) setnested "$f" requiredStorage "$2" ;; ram) setnested "$f" requiredRam "$2" ;; *) die "check storage N | ram N" ;; esac ;;
+  internet-url) f=$(mod welcome); setnested "$f" internetCheckUrl "${1:?url}" ;;
+  finish)
+    f=$(mod finished); sub=$1; shift
+    case $sub in
+      restart) setkey "$f" restartNowEnabled "$(onoff "$1")" ;;
+      checked) setkey "$f" restartNowChecked "$(onoff "$1")" ;;
+      command) setkey "$f" restartNowCommand "\"${1:?command}\"" ;;
+      *) die "finish restart on|off | checked on|off | command CMD" ;;
+    esac ;;
+  displaymanager)
+    f=$(mod displaymanager); sub=$1; shift
+    case $sub in
+      order) t=$(listblock displaymanagers "$1"); setblock "$f" displaymanagers "$t"; rm -f "$t" ;;
+      basic) setkey "$f" basicSetup "$(onoff "$1")" ;;
+      *) die "displaymanager order a,b,c | basic on|off" ;;
+    esac ;;
+
+  *) die "unknown command '$cmd' (claudeconfig --help)" ;;
+esac

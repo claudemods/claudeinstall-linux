@@ -57,6 +57,35 @@ claudeinstall-colors show               # print the colours in use
 
 It edits the `style:` section of the installed `branding.desc`.
 
+## claudeconfig: configure the installer for your distro
+
+`claudeconfig` (installed to `/usr/bin` by `./build.sh --install`) edits
+`/etc/claudeinstall/settings.conf` and `/etc/claudeinstall/modules/*.conf` for you. Each
+changed file is kept as `FILE.bak`. Run it as root; `claudeconfig --help` lists everything.
+
+```bash
+sudo claudeconfig preset claudemods          # install the claudemods set (config/claudemods/)
+sudo claudeconfig mode clone                 # clone the live system, no users (or: new)
+sudo claudeconfig image erofs /run/arch/bootmnt/LiveOS/rootfs.img   # or: squashfs
+sudo claudeconfig image tools                # are unsquashfs / erofs kernel support there?
+sudo claudeconfig fs default btrfs           # default filesystem; fs available btrfs,ext4,f2fs,xfs
+sudo claudeconfig btrfs compress zstd:22     # or off; also: btrfs ssd/hdd/options/swap-subvol
+sudo claudeconfig btrfs subvols default      # or: minimal | none | list | add MP SUBVOL | remove MP
+sudo claudeconfig kernel linux-cachyos       # initramfs kernel
+sudo claudeconfig service enable sddm.service mandatory
+sudo claudeconfig service set-default graphical.target
+```
+
+It also covers swap and partitioning defaults, bootloader, users (shell, autologin, groups),
+the welcome-page requirements, the finish page and the display manager order. squashfs images
+are unpacked with `unsquashfs`; erofs images are mounted (loop) and copied with rsync, so they
+need erofs support in the kernel.
+
+The `claudemods` preset is your Calamares configuration adapted to ClaudeInstall's module
+names and keys: `services` is now `services-systemd`, and the Manjaro-only `mhwdcfg` and
+`postcfg` modules, plus the `kernel`/`img`/`timeout` bootloader keys and a few `users` keys,
+do not exist here and are left out.
+
 ## Configuration
 
 | File | Purpose |

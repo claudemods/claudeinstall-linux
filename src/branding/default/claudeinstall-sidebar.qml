@@ -25,18 +25,6 @@ Rectangle {
         anchors.fill: parent;
         spacing: 2;
 
-        Image {
-            Layout.leftMargin: 12;
-            Layout.rightMargin: 12;
-            Layout.alignment: Qt.AlignCenter;
-            id: logo;
-            width: 30;
-            height: width;  // square
-            source: "file:/" + Branding.imagePath(Branding.ProductLogo);
-            sourceSize.width: width;
-            sourceSize.height: height;
-        }
-
         Repeater {
             model: ViewManager
             Rectangle {

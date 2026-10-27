@@ -72,6 +72,13 @@ install_config() {
   $SUDO mkdir -p "$_d/modules"
   # the colour command: claudeinstall-colors {default|claudemods|custom ...|show}
   $SUDO install -Dm755 "$SRCDIR/claudeinstall-colors" "$1/usr/bin/claudeinstall-colors"
+  # claudeconfig: settings command, plus the claudemods preset it can install
+  $SUDO install -Dm755 "$SRCDIR/claudeconfig" "$1/usr/bin/claudeconfig"
+  for _pf in "$SRCDIR"/config/*/settings.conf "$SRCDIR"/config/*/modules/*.conf; do
+    [ -f "$_pf" ] || continue
+    _rel=${_pf#"$SRCDIR"/config/}
+    $SUDO install -Dm644 "$_pf" "$1/usr/share/claudeinstall/presets/$_rel"
+  done
   if [ "$MODE" = clone ]; then
     $SUDO cp "$SRCDIR/settings-clone.conf" "$_d/settings.conf"
     $SUDO cp "$SRCDIR/unpackfs-clone.conf" "$_d/modules/unpackfs-clone.conf"
