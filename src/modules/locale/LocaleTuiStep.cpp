@@ -13,6 +13,9 @@
 
 #include "utils/RAII.h"
 
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+
 CLAUDEINSTALL_PLUGIN_FACTORY_DEFINITION( LocaleTuiStepFactory, registerPlugin< LocaleTuiStep >(); )
 
 using namespace ClaudeInstall::Locale;
@@ -222,7 +225,19 @@ LocaleTuiStep::createComponent()
     }
     m_formats = m_languages;
 
-    m_regionList = Tui::picker( tr( "Region", "@label" ), &m_regions, &m_region, [ this ] { regionChanged(); } );
+    // One list: the region. Enter chooses it and goes to the next page (Ctrl-N, see TuiApplication).
+    // The zone follows from the region (the detected one if it is in that region).
+    m_regionList = Tui::picker( tr( "Region", "@label" ),
+                                &m_regions,
+                                &m_region,
+                                [ this ] { regionChanged(); },
+                                []
+                                {
+                                    if ( auto* screen = ftxui::ScreenInteractive::Active() )
+                                    {
+                                        screen->PostEvent( ftxui::Event::Special( "\x0E" ) );
+                                    }
+                                } );
     m_zoneList = Tui::picker( tr( "Zone", "@label" ), &m_zones, &m_zone, [ this ] { zoneChanged(); } );
     m_languageList = Tui::picker( tr( "System language", "@label" ),
                                   &m_languages,
@@ -248,20 +263,18 @@ LocaleTuiStep::createComponent()
                                 } );
     sync( true );
 
-    Component lists = Container::Horizontal( { m_regionList, m_zoneList, m_languageList, m_formatList } );
-    return Renderer( lists,
+    // Only the region is asked. The zone, the system language and the format of numbers and
+    // dates follow from it and from the language chosen on the first page.
+    return Renderer( m_regionList,
                      [ this ]
                      {
                          sync( false );
-                         return vbox( { hbox( { m_regionList->Render() | size( WIDTH, EQUAL, 18 ),
-                                                m_zoneList->Render() | size( WIDTH, EQUAL, 26 ),
-                                                m_languageList->Render() | flex,
-                                                m_formatList->Render() | flex } )
-                                            | flex,
-                                        text( m_config->currentLanguageStatus().toStdString() ),
-                                        text( m_config->currentLCStatus().toStdString() ),
-                                        text( ( tr( "Left and right change the list, up and down the choice.", "@label" ) )
-                                                  .toStdString() )
-                                            | dim } );
+                         std::string zone;
+                         if ( const auto* location = m_config->currentLocation() )
+                         {
+                             zone = ( location->region() + QLatin1Char( '/' ) + location->zone() ).toStdString();
+                         }
+                         return vbox( { m_regionList->Render() | flex,
+                                        text( " " + tr( "Time zone:", "@label" ).toStdString() + " " + zone ) | dim } );
                      } );
 }

@@ -104,11 +104,14 @@ TUIDLLEXPORT ftxui::Component check( const QString& label, bool* value, const st
  * @p entries and @p selected must outlive the component; the list may be
  * changed (replaced) at any time. @p onChange is called when the user moves
  * to another entry. The title is highlighted while the list has the focus.
+ * Enter or space chooses the entry: @p onEnter is called, or, if there is none,
+ * the focus moves to the next field.
  */
 TUIDLLEXPORT ftxui::Component picker( const QString& title,
                                       std::vector< std::string >* entries,
                                       int* selected,
-                                      const std::function< void() >& onChange );
+                                      const std::function< void() >& onChange,
+                                      const std::function< void() >& onEnter = {} );
 
 /** @brief Fills @p entries with the text (@p role) of the rows of a list @p model
  *

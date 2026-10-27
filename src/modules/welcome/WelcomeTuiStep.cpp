@@ -185,9 +185,19 @@ WelcomeTuiStep::createComponent()
             // One column, top to bottom: the greeting, what is wrong (if anything), and then
             // the language list using the whole width and the rest of the height.
             // The list is the only thing to operate here, so it always has the keyboard focus.
+            // Enter / Next do nothing while a required check fails: say so instead of staying silent
+            Elements blocked;
+            if ( !isNextEnabled() && requirements && requirements->satisfiedRequirements() == false
+                 && !requirements->satisfiedMandatory() )
+            {
+                blocked.push_back( paragraph( tr( "Next is disabled until the red item above is fixed.", "@label" ).toStdString() )
+                                   | color( Color::Red ) | bold );
+            }
+
             return vbox( { paragraph( welcome.toStdString() ) | bold,
                            separator(),
                            vbox( problems ),
+                           vbox( blocked ),
                            separator(),
                            text( " " + tr( "Choose your language: Up / Down, then Enter", "@title" ).toStdString() )
                                | bold,

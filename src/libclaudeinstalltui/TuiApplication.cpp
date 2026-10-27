@@ -263,12 +263,7 @@ TuiApplication::render()
                                    page | flex | border } )
                                | flex,
                            separator(),
-                           hbox( footer ),
-                           text( " " + tr( "Keyboard only: Tab / Shift-Tab change field, Up / Down choose, Enter / Space select, "
-                                           "PgUp / PgDn scroll",
-                                           "@label" )
-                                          .toStdString() )
-                               | dim } );
+                           hbox( footer ) } );
 
     const QString message = !m_failure.isEmpty() ? m_failure : m_question;
     if ( !message.isEmpty() )

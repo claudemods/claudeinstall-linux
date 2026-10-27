@@ -9,6 +9,9 @@
 #   --no-deps        skip installing dependencies
 #   --new | --clone  new-system installer, or clone of the running system
 #   --gui | --tui | --both   which interface (GUI is always Qt6)
+#   --test           try the installer on a machine whose only disk holds the running
+#                    system (it is normally hidden, which blocks the first page).
+#                    Partitioning is NOT carried out in this build.
 #   (with none of those options, the script asks)
 #   --install        run "install" afterwards (uses sudo if not root)
 #   --package        also create a distro package (deb / rpm / pkg.tar via cpack or makepkg-less tarball)
@@ -37,10 +40,11 @@ for a in "$@"; do
     --both)      GUI=ON TUI=ON ;;
     --new)       MODE=new ;;
     --clone)     MODE=clone ;;
+    --test)      CMAKE_ARGS="$CMAKE_ARGS -DDEBUG_PARTITION_UNSAFE=ON" ;;
     --install)   INSTALL=1 ;;
     --package)   PACKAGE=1 ;;
     --clean)     CLEAN=1 ;;
-    -h|--help)   sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a" >&2; exit 1 ;;
   esac
 done

@@ -13,6 +13,9 @@
 
 #include "utils/RAII.h"
 
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+
 CLAUDEINSTALL_PLUGIN_FACTORY_DEFINITION( KeyboardTuiStepFactory, registerPlugin< KeyboardTuiStep >(); )
 
 KeyboardTuiStep::KeyboardTuiStep( QObject* parent )
@@ -135,7 +138,9 @@ KeyboardTuiStep::createComponent()
     m_config->keyboardModels()->setCurrentIndex();  // To default PC105, as the GUI does
     sync();
 
-    auto layouts = Tui::picker( tr( "Layout", "@label" ),
+    // One list: the layout. The variant, model and layout switcher keep their defaults.
+    // Enter chooses the layout and goes to the next page (Ctrl-N, see TuiApplication).
+    auto layouts = Tui::picker( tr( "Keyboard layout", "@label" ),
                                 &m_layouts,
                                 &m_layout,
                                 [ this ]
@@ -144,51 +149,20 @@ KeyboardTuiStep::createComponent()
                                     {
                                         m_config->keyboardLayouts()->setCurrentIndex( m_layout );
                                     }
+                                },
+                                []
+                                {
+                                    if ( auto* screen = ftxui::ScreenInteractive::Active() )
+                                    {
+                                        screen->PostEvent( ftxui::Event::Special( "\x0E" ) );
+                                    }
                                 } );
-    auto variants = Tui::picker( tr( "Variant", "@label" ),
-                                 &m_variants,
-                                 &m_variant,
-                                 [ this ]
-                                 {
-                                     if ( !m_syncing )
-                                     {
-                                         m_config->keyboardVariants()->setCurrentIndex( m_variant );
-                                     }
-                                 } );
-    auto models = Tui::picker( tr( "Keyboard model", "@label" ),
-                               &m_models,
-                               &m_model,
-                               [ this ]
-                               {
-                                   if ( !m_syncing )
-                                   {
-                                       m_config->keyboardModels()->setCurrentIndex( m_model );
-                                   }
-                               } );
-    auto groups = Tui::picker( tr( "Switch layouts with", "@label" ),
-                               &m_groups,
-                               &m_group,
-                               [ this ]
-                               {
-                                   if ( !m_syncing )
-                                   {
-                                       m_config->keyboardGroupsSwitchers()->setCurrentIndex( m_group );
-                                   }
-                               } );
 
-    Component lists = Container::Horizontal( { layouts, variants, models, groups } );
-    return Renderer( lists,
-                     [ this, layouts, variants, models, groups ]
+    return Renderer( layouts,
+                     [ this, layouts ]
                      {
                          sync();
-                         return vbox( { hbox( { layouts->Render() | flex,
-                                                variants->Render() | flex,
-                                                models->Render() | size( WIDTH, EQUAL, 28 ),
-                                                groups->Render() | size( WIDTH, EQUAL, 28 ) } )
-                                            | flex,
-                                        text( m_config->prettyStatus().toStdString() ),
-                                        text( ( tr( "Left and right change the list, up and down the choice.", "@label" ) )
-                                                  .toStdString() )
-                                            | dim } );
+                         return vbox( { layouts->Render() | flex,
+                                        text( " " + m_config->prettyStatus().toStdString() ) | dim } );
                      } );
 }

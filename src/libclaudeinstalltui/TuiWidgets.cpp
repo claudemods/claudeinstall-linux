@@ -182,16 +182,21 @@ ftxui::Component
 picker( const QString& title,
         std::vector< std::string >* entries,
         int* selected,
-        const std::function< void() >& onChange )
+        const std::function< void() >& onChange,
+        const std::function< void() >& onEnter )
 {
     using namespace ftxui;
 
     MenuOption option = MenuOption::Vertical();
     option.on_change = onChange;
-    // Enter chooses the highlighted entry and moves on to the next field
-    option.on_enter = []
+    // Enter chooses the highlighted entry and, unless told otherwise, moves on to the next field
+    option.on_enter = [ onEnter ]
     {
-        if ( auto* screen = ScreenInteractive::Active() )
+        if ( onEnter )
+        {
+            onEnter();
+        }
+        else if ( auto* screen = ScreenInteractive::Active() )
         {
             screen->PostEvent( Event::Tab );
         }
