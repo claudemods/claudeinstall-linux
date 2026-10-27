@@ -2,6 +2,24 @@
      SPDX-License-Identifier: CC0-1.0
 -->
 
+<p align="center">
+<img src="https://i.postimg.cc/JhMRf2RZ/claudemods-03-17-2025.gif">
+
+<div align="center">
+
+  <a href="https://www.linux.org" target="_blank"><img src="https://img.shields.io/badge/OS-Linux-e06c75?style=for-the-badge&logo=linux" /></a>
+
+  <a href="https://archlinux.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Arch-56b6c2?style=for-the-badge&logo=arch-linux" /></a>
+  <a href="https://ubuntu.com/" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Ubuntu-E95420?style=for-the-badge&logo=Ubuntu" /></a>
+  <a href="https://www.debian.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Debian-CE0058?style=for-the-badge&logo=Debian" /></a>
+  <a href="https://getfedora.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Fedora-51A2DA?style=for-the-badge&logo=fedora" /></a>
+  <a href="https://www.opensuse.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-openSUSE-73BA25?style=for-the-badge&logo=opensuse" /></a>
+  <a href="https://alpinelinux.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Alpine-0D597F?style=for-the-badge&logo=alpine-linux" /></a>
+  <a href="https://www.gentoo.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Gentoo-54487A?style=for-the-badge&logo=gentoo" /></a>
+  <a href="https://voidlinux.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Void-478061?style=for-the-badge&logo=void-linux" /></a>
+
+</div>
+
 # ClaudeInstall
 
 A distribution-independent Linux system installer written entirely in C++ (Qt6), derived from
@@ -31,9 +49,29 @@ can customise it through branding and configuration without patching the code.
 ./build.sh --new --tui --package
 ```
 
-`build.sh` detects your distribution (Debian/Ubuntu, Fedora/RHEL, openSUSE, Arch, Alpine,
-Gentoo, Void), installs the build dependencies, builds with CMake/Ninja, and can install the
-result or wrap it into a package. Run `./build.sh --help` for all options.
+`build.sh` detects your distribution, installs the build dependencies, builds with
+CMake/Ninja, and can install the result or wrap it into a package. Run `./build.sh --help`
+for all options.
+
+### Supported distributions
+
+`build.sh` reads `/etc/os-release` (`ID` and `ID_LIKE`) and picks the package manager and
+package names for the family:
+
+| Family | Distributions | Package manager |
+|---|---|---|
+| Arch | Arch Linux, CachyOS, Manjaro, EndeavourOS, Garuda, KaOS | `pacman` |
+| Debian | Debian, Ubuntu, Linux Mint, KDE neon, Pop!_OS, Raspberry Pi OS | `apt` |
+| Fedora | Fedora, RHEL, CentOS, Rocky Linux, AlmaLinux, Nobara | `dnf` |
+| openSUSE | openSUSE Tumbleweed and Leap, SLES | `zypper` |
+| Alpine | Alpine Linux, postmarketOS | `apk` |
+| Gentoo | Gentoo | `emerge` |
+| Void | Void Linux | `xbps` |
+
+Only the Arch family (CachyOS) has been built so far; the other families' package lists are
+untested and may need adjusting for your release. The installer's own `packages` module
+supports `pacman`, `apt`, `dnf`, `dnf5`, `yum`, `zypp`, `apk`, `portage`, `entropy`, `luet`,
+`packagekit` and `pamac` as backends for the installed system.
 
 `build.sh` also repairs a partly copied source tree before building (for example partition
 files that landed in `src/modules/`), keeps going after a failed file, and writes every compile
