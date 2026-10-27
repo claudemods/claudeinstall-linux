@@ -47,7 +47,7 @@ for a in "$@"; do
     --install)   INSTALL=1 ;;
     --package)   PACKAGE=1 ;;
     --clean)     CLEAN=1 ;;
-    -h|--help)   sed -n '2,29p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a" >&2; exit 1 ;;
   esac
 done
@@ -70,7 +70,8 @@ fi
 if [ -z "$GUI" ]; then
   ask _u "Which interface?" "1) GUI (Qt6)" "2) TUI (terminal)" "3) Both"
   case $_u in 2) GUI=OFF TUI=ON ;; 3) GUI=ON TUI=ON ;; *) GUI=ON TUI=OFF ;; esac
-fiecho ":: Mode: $MODE, GUI=$GUI, TUI=$TUI (Qt6)"
+fi
+echo ":: Mode: $MODE, GUI=$GUI, TUI=$TUI (Qt6)"
 
 # Install the chosen configuration under $1 (a root, e.g. DESTDIR or empty).
 install_config() {
@@ -128,6 +129,10 @@ for id in $ID $ID_LIKE; do
 done
 [ -n "$FAMILY" ] || { echo "! Unsupported distro: $ID ($ID_LIKE)" >&2; exit 1; }
 echo ":: Distro: $PRETTY_NAME (family: $FAMILY)"
+if [ "$MODE" = distro ] && [ "$FAMILY" != arch ]; then
+  echo "! --claudemodsdistrosonline installs with pacstrap and must be built and run on an Arch-family system" >&2
+  exit 1
+fi
 
 # ---- dependencies -----------------------------------------------------------
 install_deps() {
@@ -271,5 +276,7 @@ if [ $PACKAGE = 1 ]; then
   echo ":: Package output is in $PWD and $BUILDDIR (fpm needed for deb/rpm/pacman; tarball otherwise)"
 fi
 
-[ "$MODE" = distro ] && echo ":: claudemods distros online: run  sudo claudeinstall  (GUI)  or  sudo claudeinstall-tui  (TUI)"
+if [ "$MODE" = distro ]; then
+  echo ":: claudemods distros online: run  sudo claudeinstall  (GUI)  or  sudo claudeinstall-tui  (TUI)"
+fi
 echo ":: Done. GUI: $BUILDDIR/src/claudeinstall/claudeinstall  TUI: $BUILDDIR/src/claudeinstall-tui/claudeinstall-tui"
