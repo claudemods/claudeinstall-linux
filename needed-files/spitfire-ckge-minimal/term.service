@@ -1,0 +1,11 @@
+[Unit]
+Description=Set TTY Colors
+After=getty.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/term.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
