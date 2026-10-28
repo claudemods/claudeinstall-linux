@@ -11,4 +11,9 @@ properties:
     profileKey: { type: string }
     phase: { type: string, enum: [ install, customize ] }
     retries: { type: integer, minimum: 0 }
+    assetsUrl: { type: string }
+    assetsSha256: { type: string }
+    regdomKey: { type: string }
+    unresolvedPackages: { type: string, enum: [ fail, warn ] }
+    packageRenames: { type: object }
     wirelessRegdom: { type: string }

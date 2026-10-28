@@ -14,9 +14,11 @@
 #include "utils/PluginFactory.h"
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QMap>
 #include <QMutex>
 #include <QObject>
+#include <QSet>
 #include <QStringList>
 #include <QVariantMap>
 
@@ -32,9 +34,12 @@
  *    downloads, commands, commands as the new user) inside the target. Run it
  *    after the users module.
  *
- * Package names that no longer exist are left out and logged, and the package
- * lists are refreshed between attempts, so a profile does not rot when the
- * repositories change.
+ * Package names are checked against the synced repository databases before
+ * pacstrap runs, and a name that is gone is resolved instead of skipped: through
+ * the rename table (profiles/package-renames.conf), the "replaces" and "provides"
+ * fields of the repositories, or a close spelling (-git/-bin suffixes). What
+ * cannot be resolved stops the install early with suggestions, before anything
+ * is downloaded. Package lists are refreshed between attempts.
  */
 class PLUGINDLLEXPORT DistroProfileJob : public ClaudeInstall::CppJob
 {
@@ -60,6 +65,22 @@ private:
         QString assets;
         QMap< QString, QString > extra;  ///< further @NAME@ placeholders
     };
+
+    /// What the synced pacman databases know: names, groups, and who provides / replaces what
+    struct RepoIndex
+    {
+        QSet< QString > names;
+        QSet< QString > groups;
+        QHash< QString, QStringList > providedBy;  ///< virtual name -> packages providing it
+        QHash< QString, QStringList > replacedBy;  ///< old name -> packages that replace it
+    };
+
+    bool loadRepoIndex( RepoIndex& index ) const;
+    /// Finds the package that now stands for @p name, or an empty string
+    QString findReplacement( const RepoIndex& index, const QString& name, const QStringList& wanted, QString& how ) const;
+    /// Replaces names that left the repositories by their successors; errors when one cannot be resolved
+    ClaudeInstall::JobResult resolvePackages( QStringList& packages );
+    void loadRenameTable();
 
     QString expand( const QString& text, const Context& ctx ) const;
     bool loadProfile( const QString& id, QVariantMap& out, QString& error ) const;
@@ -91,6 +112,9 @@ private:
     QString m_phase;
     QString m_regdom;
     int m_retries = 3;
+    bool m_unresolvedIsFatal = true;
+    QMap< QString, QString > m_renames;  ///< old name -> new name
+    QSet< QString > m_removed;           ///< names that are gone for good and are dropped on purpose
     QVariantMap m_configuration;
 };
 

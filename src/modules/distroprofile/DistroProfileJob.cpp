@@ -1,4 +1,4 @@
-/* === This file is part of ClaudeInstall - <https://claudeinstall.io> ===
+﻿/* === This file is part of ClaudeInstall - <https://claudeinstall.io> ===
  *
  *   SPDX-License-Identifier: GPL-3.0-or-later
  *
@@ -28,6 +28,9 @@
 #include <QThread>
 #include <QUrl>
 
+#include <QVector>
+
+#include <algorithm>
 #include <utility>
 
 using ClaudeInstall::JobResult;
@@ -80,6 +83,112 @@ missingPackages( const QString& output )
     }
     names.removeDuplicates();
     return names;
+}
+
+/// "12.3M" / "850k" / "4096" as printed by curl's progress meter, in bytes
+double
+parseCurlSize( const QString& text, bool& ok )
+{
+    static const QRegularExpression re( QStringLiteral( "^([0-9]+(?:\\.[0-9]+)?)([kMGTP]?)$" ) );
+    const auto m = re.match( text );
+    ok = m.hasMatch();
+    if ( !ok )
+    {
+        return 0.0;
+    }
+    double value = m.captured( 1 ).toDouble();
+    const int power = m.captured( 2 ).isEmpty() ? 0 : QStringLiteral( "kMGTP" ).indexOf( m.captured( 2 ) ) + 1;
+    for ( int i = 0; i < power; ++i )
+    {
+        value *= 1024.0;
+    }
+    return value;
+}
+
+QString
+humanSize( double bytes )
+{
+    static const char* const units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    int i = 0;
+    while ( bytes >= 1024.0 && i < 4 )
+    {
+        bytes /= 1024.0;
+        ++i;
+    }
+    return QString::number( bytes, 'f', i == 0 ? 0 : 1 ) + QLatin1Char( ' ' ) + QLatin1String( units[ i ] );
+}
+
+/**
+ * One row of curl's progress meter turned into words: percentage, size done / total,
+ * speed, size left and time left. Rows that are not the meter come back unchanged;
+ * the meter's header row comes back empty.
+ */
+QString
+curlProgress( const QString& line )
+{
+    static const QRegularExpression space( QStringLiteral( "\\s+" ) );
+    const QStringList t = line.split( space, Qt::SkipEmptyParts );
+    if ( t.size() == 12 && t.first() == QLatin1String( "%" ) )
+    {
+        return QString();
+    }
+    if ( t.size() < 12 )
+    {
+        return line;
+    }
+    bool isNumber = false;
+    t.first().toInt( &isNumber );
+    if ( !isNumber )
+    {
+        return line;
+    }
+
+    bool okTotal = false, okGot = false, okSpeed = false;
+    const double total = parseCurlSize( t.at( 1 ), okTotal );
+    const double got = parseCurlSize( t.at( 3 ), okGot );
+    const double speed = parseCurlSize( t.at( 11 ), okSpeed );
+    if ( !okTotal || !okGot )
+    {
+        return line;
+    }
+    const QString rate = okSpeed ? humanSize( speed ) + QStringLiteral( "/s" ) : QStringLiteral( "-" );
+    const QString eta = t.at( 10 ).contains( QLatin1Char( ':' ) ) && !t.at( 10 ).contains( QLatin1Char( '-' ) )
+        ? QStringLiteral( ", %1 remaining" ).arg( t.at( 10 ) )
+        : QString();
+    if ( total <= 0.0 )
+    {
+        return QStringLiteral( "%1 received, %2" ).arg( humanSize( got ), rate );
+    }
+    return QStringLiteral( "%1% - %2 of %3, %4, %5 left%6" )
+        .arg( t.first(), humanSize( got ), humanSize( total ), rate, humanSize( total - got ), eta );
+}
+
+/// "libfoo.so=1-64" -> "libfoo.so"
+QString
+withoutVersion( const QString& dependency )
+{
+    const int cut = dependency.indexOf( QRegularExpression( QStringLiteral( "[=<>]" ) ) );
+    return cut < 0 ? dependency : dependency.left( cut );
+}
+
+int
+editDistance( const QString& a, const QString& b )
+{
+    QVector< int > prev( b.size() + 1 ), cur( b.size() + 1 );
+    for ( int j = 0; j <= b.size(); ++j )
+    {
+        prev[ j ] = j;
+    }
+    for ( int i = 1; i <= a.size(); ++i )
+    {
+        cur[ 0 ] = i;
+        for ( int j = 1; j <= b.size(); ++j )
+        {
+            cur[ j ] = std::min( { prev[ j ] + 1, cur[ j - 1 ] + 1, prev[ j - 1 ] + ( a.at( i - 1 ) == b.at( j - 1 ) ? 0 : 1 ) } );
+        }
+        std::swap( prev, cur );
+    }
+    return prev[ b.size() ];
 }
 
 /// Profile ids become file names: allow nothing that could leave the profiles directory
@@ -141,6 +250,7 @@ DistroProfileJob::runStreaming( const QStringList& cmd, QString& output )
     }
 
     const QString prefix = prettyStatusMessage();
+    const bool isCurl = cmd.first() == QLatin1String( "curl" );
     QString pending;
     auto consume = [ & ]( const QByteArray& chunk )
     {
@@ -151,10 +261,11 @@ DistroProfileJob::runStreaming( const QStringList& cmd, QString& output )
         pending = parts.last();
         for ( int i = 0; i + 1 < parts.size(); ++i )
         {
-            const QString line = parts.at( i ).trimmed();
+            const QString raw = parts.at( i ).trimmed();
+            const QString line = ( isCurl && !raw.isEmpty() ) ? curlProgress( raw ) : raw;
             if ( !line.isEmpty() )
             {
-                setStatus( prefix + QStringLiteral( ": " ) + line.left( 110 ) );
+                setStatus( prefix + QStringLiteral( ": " ) + line.left( 130 ) );
             }
         }
     };
@@ -255,12 +366,259 @@ DistroProfileJob::refreshHostPackageLists()
     host( { "pacman-key", "--populate" } );
 }
 
+void
+DistroProfileJob::loadRenameTable()
+{
+    // profiles/package-renames.conf is plain data (renames: { old: new }, removed: [ names ]),
+    // so a renamed package is fixed by editing it, without a rebuild. The module's own
+    // packageRenames setting wins over the file.
+    bool ok = false;
+    const QVariantMap file = ClaudeInstall::YAML::load( m_profilesDir + QStringLiteral( "/package-renames.conf" ), &ok );
+    QVariantMap renames = ok ? file.value( "renames" ).toMap() : QVariantMap();
+    const QVariantMap own = m_configuration.value( "packageRenames" ).toMap();
+    for ( auto it = own.constBegin(); it != own.constEnd(); ++it )
+    {
+        renames.insert( it.key(), it.value() );
+    }
+    for ( auto it = renames.constBegin(); it != renames.constEnd(); ++it )
+    {
+        m_renames.insert( it.key(), it.value().toString() );
+    }
+    if ( ok )
+    {
+        const QStringList removed = file.value( "removed" ).toStringList();
+        m_removed = QSet< QString >( removed.begin(), removed.end() );
+    }
+}
+
+bool
+DistroProfileJob::loadRepoIndex( RepoIndex& index ) const
+{
+    // Every synced database is a tar of <name>-<version>/desc files: read them all in one go
+    QProcess proc;
+    proc.start( QStringLiteral( "sh" ),
+                { QStringLiteral( "-c" ),
+                  QStringLiteral( "for f in /var/lib/pacman/sync/*.db; do "
+                                  "bsdtar -xOf \"$f\" --include '*/desc' 2>/dev/null || tar -xOf \"$f\" --wildcards '*/desc' 2>/dev/null; "
+                                  "echo; done" ) } );
+    if ( !proc.waitForFinished( 120000 ) )
+    {
+        proc.kill();
+        return false;
+    }
+    const QStringList lines = QString::fromUtf8( proc.readAllStandardOutput() ).split( QLatin1Char( '\n' ) );
+
+    QString key, current;
+    for ( const QString& raw : lines )
+    {
+        const QString line = raw.trimmed();
+        if ( line.isEmpty() )
+        {
+            key.clear();
+        }
+        else if ( line.startsWith( QLatin1Char( '%' ) ) && line.endsWith( QLatin1Char( '%' ) ) && line.size() > 2 )
+        {
+            key = line.mid( 1, line.size() - 2 );
+        }
+        else if ( key == QLatin1String( "NAME" ) )
+        {
+            current = line;
+            index.names.insert( line );
+        }
+        else if ( key == QLatin1String( "GROUPS" ) )
+        {
+            index.groups.insert( line );
+        }
+        else if ( key == QLatin1String( "PROVIDES" ) )
+        {
+            index.providedBy[ withoutVersion( line ) ] << current;
+        }
+        else if ( key == QLatin1String( "REPLACES" ) )
+        {
+            index.replacedBy[ withoutVersion( line ) ] << current;
+        }
+    }
+    return !index.names.isEmpty();
+}
+
+QString
+DistroProfileJob::findReplacement( const RepoIndex& index, const QString& name, const QStringList& wanted, QString& how ) const
+{
+    // Several candidates: one the profile asks for anyway, else the one that looks most like the old name
+    auto pick = [ & ]( QStringList candidates ) -> QString
+    {
+        candidates.removeDuplicates();
+        std::sort( candidates.begin(), candidates.end() );
+        for ( const QString& c : candidates )
+        {
+            if ( wanted.contains( c ) )
+            {
+                return c;
+            }
+        }
+        QString best;
+        int bestLength = -1;
+        for ( const QString& c : candidates )
+        {
+            int n = 0;
+            while ( n < c.size() && n < name.size() && c.at( n ) == name.at( n ) )
+            {
+                ++n;
+            }
+            if ( n > bestLength )
+            {
+                best = c;
+                bestLength = n;
+            }
+        }
+        return best;
+    };
+
+    // 1. The rename table (may chain: a -> b -> c)
+    QString target = name;
+    for ( int hops = 0; hops < 4 && m_renames.contains( target ); ++hops )
+    {
+        target = m_renames.value( target );
+        if ( index.names.contains( target ) || index.groups.contains( target ) )
+        {
+            how = tr( "rename table" );
+            return target;
+        }
+    }
+    // 2. A package that declares "replaces" for the old name (how pacman itself follows renames)
+    if ( index.replacedBy.contains( name ) )
+    {
+        how = tr( "replaced by" );
+        return pick( index.replacedBy.value( name ) );
+    }
+    // 3. A package that provides the name
+    if ( index.providedBy.contains( name ) )
+    {
+        how = tr( "provided by" );
+        return pick( index.providedBy.value( name ) );
+    }
+    // 4. The same package without a packaging suffix (-git, -bin ...)
+    static const QRegularExpression suffix( QStringLiteral( "-(git|bin|svn|hg|nightly|stable|beta|dev)$" ) );
+    QString stripped = name;
+    stripped.remove( suffix );
+    if ( stripped != name && index.names.contains( stripped ) )
+    {
+        how = tr( "without the suffix" );
+        return stripped;
+    }
+    // 5. One-character typo or spelling change, only when it is unambiguous
+    if ( name.size() >= 6 )
+    {
+        QString found;
+        int count = 0;
+        for ( const QString& candidate : index.names )
+        {
+            if ( std::abs( candidate.size() - name.size() ) <= 1 && editDistance( candidate, name ) == 1 )
+            {
+                found = candidate;
+                ++count;
+            }
+        }
+        if ( count == 1 )
+        {
+            how = tr( "similar name" );
+            return found;
+        }
+    }
+    return QString();
+}
+
+JobResult
+DistroProfileJob::resolvePackages( QStringList& packages )
+{
+    setStatus( tr( "Checking the package names against the repositories", "@status" ) );
+    RepoIndex index;
+    if ( !loadRepoIndex( index ) )
+    {
+        // Cannot check ahead (no bsdtar / empty databases): pacstrap's own errors are handled in bootstrap()
+        cWarning() << "Could not read the package databases; names are not checked ahead.";
+        return JobResult::ok();
+    }
+
+    QStringList result, notes, unresolved;
+    for ( const QString& p : std::as_const( packages ) )
+    {
+        const QString base = p.section( QLatin1Char( '/' ), -1 );  // "extra/foo" -> "foo"
+        if ( m_removed.contains( base ) )
+        {
+            cWarning() << "Package" << p << "is listed as removed for good; dropped.";
+            notes << tr( "%1 dropped (listed as removed)" ).arg( p );
+            continue;
+        }
+        if ( index.names.contains( base ) || index.groups.contains( base ) )
+        {
+            result << p;
+            continue;
+        }
+        QString how;
+        const QString to = findReplacement( index, base, packages, how );
+        if ( !to.isEmpty() )
+        {
+            cWarning() << "Package" << p << "is not in the repositories any more; using" << to << "(" << how << ")";
+            notes << tr( "%1 -> %2 (%3)" ).arg( p, to, how );
+            result << to;
+        }
+        else
+        {
+            unresolved << p;
+        }
+    }
+    result.removeDuplicates();
+    ClaudeInstall::JobQueue::instance()->globalStorage()->insert( "distroprofileSubstitutions", notes );
+
+    if ( !unresolved.isEmpty() )
+    {
+        QStringList report;
+        for ( const QString& p : std::as_const( unresolved ) )
+        {
+            const QString base = p.section( QLatin1Char( '/' ), -1 );
+            QStringList close;
+            for ( const QString& n : std::as_const( index.names ) )
+            {
+                if ( n.size() >= 5 && ( n.contains( base ) || base.contains( n ) ) )
+                {
+                    close << n;
+                }
+            }
+            std::sort( close.begin(), close.end() );
+            report << ( close.isEmpty() ? p : p + QStringLiteral( "  (maybe: " ) + close.mid( 0, 5 ).join( QStringLiteral( ", " ) ) + ')' );
+        }
+        cWarning() << "No replacement found for:" << report;
+        if ( m_unresolvedIsFatal )
+        {
+            return JobResult::error( tr( "Packages not found" ),
+                                     tr( "These packages are not in the repositories and nothing replaces them:\n%1\n"
+                                         "Add the new name to package-renames.conf (renames:) or fix the profile." )
+                                         .arg( report.join( QLatin1Char( '\n' ) ) ) );
+        }
+        // unresolvedPackages: warn in the configuration keeps the old behaviour on purpose
+        for ( const QString& p : std::as_const( unresolved ) )
+        {
+            notes << tr( "%1 dropped (not found)" ).arg( p );
+        }
+    }
+    packages = result;
+    return JobResult::ok();
+}
+
 JobResult
 DistroProfileJob::bootstrap( const QString& root, QStringList packages )
 {
     refreshHostPackageLists();
+    loadRenameTable();
+    {
+        auto resolved = resolvePackages( packages );
+        if ( !resolved )
+        {
+            return resolved;
+        }
+    }
 
-    QStringList skipped;
     for ( int attempt = 0;; ++attempt )
     {
         if ( packages.isEmpty() )
@@ -276,21 +634,22 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
             break;
         }
 
-        // Names that vanished from the repositories are left out, not fatal.
+        // A name pacstrap cannot find although the check passed: the lists changed meanwhile.
+        // Refresh and resolve again; never leave it out silently.
         const QStringList missing = missingPackages( out );
-        QStringList kept;
-        for ( const QString& p : packages )
+        if ( !missing.isEmpty() )
         {
-            if ( !missing.contains( p ) )
+            cWarning() << "pacstrap cannot find" << missing;
+            if ( attempt >= m_retries )
             {
-                kept << p;
+                return JobResult::error( tr( "Packages not found" ), tr( "pacstrap cannot find: %1" ).arg( missing.join( QStringLiteral( ", " ) ) ) );
             }
-        }
-        if ( kept.size() != packages.size() )
-        {
-            cWarning() << "Skipping packages that are no longer in the repositories:" << missing;
-            skipped += missing;
-            packages = kept;
+            refreshHostPackageLists();
+            auto again = resolvePackages( packages );
+            if ( !again )
+            {
+                return again;
+            }
             continue;
         }
         if ( attempt >= m_retries )
@@ -306,7 +665,6 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
         QThread::sleep( 3 );
     }
 
-    ClaudeInstall::JobQueue::instance()->globalStorage()->insert( "distroprofileSkipped", skipped );
     if ( !QFileInfo::exists( root + "/usr/bin/bash" ) )
     {
         return JobResult::error( tr( "Bootstrap failed" ), tr( "/usr/bin/bash is missing in the target after installing packages." ) );
@@ -342,11 +700,12 @@ DistroProfileJob::ensureAssets( QString& assetsDir )
     QDir( dir ).removeRecursively();
     QDir().mkpath( dir );
 
+    setStatus( tr( "Downloading the files bundle", "@status" ) );
     const QStringList get { "curl", "-fL", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "30", "-o", file, m_assetsUrl };
-    const auto r = host( get );
-    if ( r.getExitCode() != 0 )
+    QString getOutput;
+    if ( runStreaming( get, getOutput ) != 0 )
     {
-        return JobResult::error( tr( "Download failed" ), tr( "Could not fetch %1:\n%2" ).arg( m_assetsUrl, r.getOutput() ) );
+        return JobResult::error( tr( "Download failed" ), tr( "Could not fetch %1:\n%2" ).arg( m_assetsUrl, getOutput.right( 400 ) ) );
     }
     if ( !m_assetsSha256.isEmpty() )
     {
@@ -609,8 +968,9 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
             return JobResult::error( tr( "Download" ), tr( "Cannot create a temporary directory." ) );
         }
         const QString file = tmp.filePath( QFileInfo( QUrl( url ).path() ).fileName() );
-        // -# prints a progress bar: its percentage is shown as the status
-        const QStringList get { "curl", "-fL", "-#", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "30", "-o", file, url };
+        // curl's progress meter is shown as percentage, size done / total, speed and size left
+        setStatus( tr( "Downloading %1", "@status" ).arg( QFileInfo( QUrl( url ).path() ).fileName() ) );
+        const QStringList get { "curl", "-fL", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "30", "-o", file, url };
         QString curlOutput;
         const int curlCode = runStreaming( get, curlOutput );
         if ( curlCode != 0 )
@@ -758,6 +1118,7 @@ DistroProfileJob::setConfigurationMap( const QVariantMap& configurationMap )
     m_regdomKey = ClaudeInstall::getString( configurationMap, "regdomKey", QStringLiteral( "packagechooser_regdom" ) );
     m_regdom = ClaudeInstall::getString( configurationMap, "wirelessRegdom" );
     m_retries = ClaudeInstall::getInteger( configurationMap, "retries", 3 );
+    m_unresolvedIsFatal = ClaudeInstall::getString( configurationMap, "unresolvedPackages", QStringLiteral( "fail" ) ) != QLatin1String( "warn" );
 }
 
 CLAUDEINSTALL_PLUGIN_FACTORY_DEFINITION( DistroProfileJobFactory, registerPlugin< DistroProfileJob >(); )

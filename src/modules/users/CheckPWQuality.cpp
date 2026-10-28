@@ -57,18 +57,9 @@ DEFINE_CHECK_FUNC( minLength )
 
 DEFINE_CHECK_FUNC( maxLength )
 {
-    int maxLength = -1;
-    if ( value.canConvert< int >() )
-    {
-        maxLength = value.toInt();
-    }
-    if ( maxLength > 0 )
-    {
-        cDebug() << Logger::SubEntry << "maxLength set to" << maxLength;
-        checks.push_back( PasswordCheck( []() { return QCoreApplication::translate( "PWQ", "Password is too long" ); },
-                                         [ maxLength ]( const QString& s ) { return s.length() <= maxLength; },
-                                         PasswordCheck::Weight( 10 ) ) );
-    }
+    // ClaudeInstall puts no upper limit on passwords: the setting is accepted and ignored
+    Q_UNUSED( checks )
+    Q_UNUSED( value )
 }
 
 #ifdef HAVE_LIBPWQUALITY

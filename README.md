@@ -138,8 +138,14 @@ Package lists go stale (renamed, split or dropped packages, 404s). Three layers 
 
 1. The `packages` module refreshes the lists and retries when an install fails, for apt, pacman,
    dnf, dnf5, yum, zypp, apk, xbps and entropy.
-2. Packages that the manager reports as no longer existing are skipped and logged; the rest
-   still install. `distroprofile` does the same for `pacstrap`.
+2. `distroprofile` does not skip a package that is gone, it resolves it before `pacstrap` runs.
+   It reads the synced databases and replaces a missing name by, in order: the rename table
+   `profiles/package-renames.conf` (plain data, no rebuild), a package that declares `replaces`
+   for it, a package that `provides` it, the same name without `-git`/`-bin`, or the only name one
+   letter away. Every substitution is logged and kept in global storage
+   (`distroprofileSubstitutions`). A name nothing replaces stops the install before a byte is
+   downloaded, listing close names; `unresolvedPackages: warn` restores dropping them.
+   The `packages` module (other package managers) still skips names the manager reports missing.
 3. `claudeinstall-pkgfix` (installed to `/usr/bin`) works on the command line: `refresh`,
    `extract` a list from a meta-package `.pkg.tar.zst`, `resolve` names against the live
    repositories (following renames), and `pacstrap` / `install` with retries. Skipped names go to
