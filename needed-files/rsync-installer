@@ -1,0 +1,21 @@
+[Desktop Entry]
+Comment[en_GB]=
+Comment=
+Comment[en_US]=
+Exec=konsole -e ./rsync.sh
+GenericName[en_GB]=claudemods rsync ext4 installer
+GenericName=claudemods rsync ext4 installer
+GenericName[en_US]=claudemods rsync ext4 installer
+Icon=calamares
+MimeType=
+Name[en_GB]=claudemods rsync ext4 installer
+Name=claudemods rsync ext4 installer
+Name[en_US]=claudemods rsync ext4 installer
+Path=/opt/rsync-installer
+PrefersNonDefaultGPU=false
+StartupNotify=true
+Terminal=false
+TerminalOptions=\s--noclose
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=
