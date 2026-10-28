@@ -17,6 +17,7 @@
 #include "utils/System.h"
 
 #include <QDir>
+#include <QRandomGenerator>
 
 #include <random>
 
@@ -44,29 +45,33 @@ SetPasswordJob::prettyStatusMessage() const
     return tr( "Setting password for user %1…", "@status" ).arg( m_userName );
 }
 
+namespace
+{
+/// A salt every crypt() understands: "$6$" (SHA512) and random characters from the crypt alphabet.
+/// (The old "$y$" + random text was not a valid yescrypt setting: crypt() answered "*0" and the
+/// account got a locked password, so nothing typed at the login screen could work.)
+QString
+sha512Salt( int length )
+{
+    static const char alphabet[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    QString salt = QStringLiteral( "$6$" );
+    for ( int i = 0; i < length; ++i )
+    {
+        salt.append( QLatin1Char( alphabet[ QRandomGenerator::system()->bounded( 64 ) ] ) );
+    }
+    salt.append( QLatin1Char( '$' ) );
+    return salt;
+}
+}  // namespace
+
 #ifndef HAVE_CRYPT_GENSALT
-/// Returns a modular hashing salt for method 6 (SHA512) with a 16 character random salt.
+/// Returns a modular hashing salt for method 6 (SHA512) with a random salt of @p length characters.
 QString
 SetPasswordJob::make_salt( int length )
 {
     Q_ASSERT( length >= 8 );
-    Q_ASSERT( length <= 128 );
-
-    QString salt_string;
-    ClaudeInstall::EntropySource source = ClaudeInstall::getPrintableEntropy( length, salt_string );
-    if ( salt_string.length() != length )
-    {
-        cWarning() << "getPrintableEntropy returned string of length" << salt_string.length() << "expected" << length;
-        salt_string.truncate( length );
-    }
-    if ( source != ClaudeInstall::EntropySource::URandom )
-    {
-        cWarning() << "Entropy data for salt is low-quality.";
-    }
-
-    salt_string.insert( 0, "$y$" );
-    salt_string.append( '$' );
-    return salt_string;
+    Q_ASSERT( length <= 16 );
+    return sha512Salt( length );
 }
 #endif
 
@@ -92,14 +97,33 @@ SetPasswordJob::exec()
         return ClaudeInstall::JobResult::ok();
     }
 
-    QString salt;
+    // crypt() returns null or a "*0" / "*1" marker when the salt is not supported: that would
+    // set an empty or locked password without any error. Try the library's best method first,
+    // then SHA512, and stop with an error if neither produces a real hash.
+    QString salt, encrypted;
+    for ( int attempt = 0; attempt < 2 && ( encrypted.size() < 13 || encrypted.startsWith( '*' ) ); ++attempt )
+    {
+        salt.clear();
 #ifdef HAVE_CRYPT_GENSALT
-    salt = crypt_gensalt( NULL, 0, NULL, 0 );
-#else
-    salt = make_salt( 16 );
+        if ( attempt == 0 )
+        {
+            const char* generated = crypt_gensalt( NULL, 0, NULL, 0 );
+            salt = generated ? QString::fromLatin1( generated ) : QString();
+        }
 #endif
-
-    QString encrypted = QString::fromLatin1( crypt( m_newPassword.toUtf8(), salt.toUtf8() ) );
+        if ( salt.isEmpty() )
+        {
+            salt = sha512Salt( 16 );
+        }
+        const char* hashed = crypt( m_newPassword.toUtf8(), salt.toUtf8() );
+        encrypted = hashed ? QString::fromLatin1( hashed ) : QString();
+    }
+    if ( encrypted.size() < 13 || encrypted.startsWith( '*' ) )
+    {
+        return ClaudeInstall::JobResult::error( tr( "Cannot set password for user %1." ).arg( m_userName ),
+                                                tr( "The password could not be hashed (salt prefix %1)." ).arg( salt.left( 3 ) ) );
+    }
+    cDebug() << "Password for" << m_userName << "hashed with method" << encrypted.left( encrypted.indexOf( '$', 1 ) + 1 );
 
     int ec = ClaudeInstall::System::instance()->targetEnvCall( { "usermod", "-p", encrypted, m_userName } );
     if ( ec )
