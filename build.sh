@@ -119,6 +119,15 @@ install_config() {
   else
     $SUDO cp "$SRCDIR/settings.conf" "$_d/settings.conf"
   fi
+
+  # Keep the installer log: the live system forgets it at reboot, so it is copied into the
+  # installed system (/var/log/ClaudeInstall.log) just before the disks are unmounted.
+  if [ -f "$SRCDIR/config/claudemods/modules/preservefiles.conf" ]; then
+    $SUDO install -Dm644 "$SRCDIR/config/claudemods/modules/preservefiles.conf" "$_d/modules/preservefiles.conf"
+  fi
+  if ! grep -Eq '^[[:space:]]*-[[:space:]]*preservefiles' "$_d/settings.conf"; then
+    $SUDO sed -i -E 's/^([[:space:]]*-[[:space:]]*)umount[[:space:]]*$/\1preservefiles\n\1umount/' "$_d/settings.conf"
+  fi
 }
 
 # ---- distro detection -------------------------------------------------------
