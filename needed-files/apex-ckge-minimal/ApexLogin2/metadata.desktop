@@ -1,0 +1,17 @@
+[SddmGreeterTheme]
+Name=ApexLogin2
+Description=simple kde loginscreen
+Author=claudemods
+Copyright=(c) 2025, claudemods
+License=CC-BY-SA
+Type=sddm-theme
+Version=0.1
+Website=https://github.com/claudemods/CCM
+Screenshot=preview.jpeg
+MainScript=Main.qml
+ConfigFile=theme.conf
+TranslationsDirectory=translations
+Email=claudemods101@gmail.com
+Theme-Id=ApexLogin2
+Theme-API=2.0
+QtVersion=6
