@@ -245,9 +245,73 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
 }
 
 JobResult
+DistroProfileJob::ensureAssets( QString& assetsDir )
+{
+    auto* gs = ClaudeInstall::JobQueue::instance()->globalStorage();
+
+    // Already fetched by the other phase
+    const QString staged = gs->value( "distroprofileAssets" ).toString();
+    if ( !staged.isEmpty() && QFileInfo( staged ).isDir() )
+    {
+        assetsDir = staged;
+        return JobResult::ok();
+    }
+    // The files are not kept in the repository: a bundle is downloaded instead. A local
+    // assetsDir that already has files in it is still honoured (offline use).
+    if ( m_assetsUrl.isEmpty() || !QDir( assetsDir ).isEmpty() )
+    {
+        return JobResult::ok();
+    }
+    if ( !m_assetsUrl.startsWith( QLatin1String( "https://" ) ) )
+    {
+        return JobResult::error( tr( "Bad configuration" ), tr( "assetsUrl must use https: %1" ).arg( m_assetsUrl ) );
+    }
+
+    const QString dir = QStringLiteral( "/var/tmp/claudeinstall-assets" );
+    const QString file = dir + QStringLiteral( ".zip" );
+    QDir( dir ).removeRecursively();
+    QDir().mkpath( dir );
+
+    const QStringList get { "curl", "-fL", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "30", "-o", file, m_assetsUrl };
+    const auto r = host( get );
+    if ( r.getExitCode() != 0 )
+    {
+        return JobResult::error( tr( "Download failed" ), tr( "Could not fetch %1:\n%2" ).arg( m_assetsUrl, r.getOutput() ) );
+    }
+    if ( !m_assetsSha256.isEmpty() )
+    {
+        QFile f( file );
+        QCryptographicHash hash( QCryptographicHash::Sha256 );
+        if ( !f.open( QIODevice::ReadOnly ) || !hash.addData( &f ) || hash.result().toHex() != m_assetsSha256.toLatin1() )
+        {
+            return JobResult::error( tr( "Download failed" ), tr( "The checksum of %1 does not match." ).arg( m_assetsUrl ) );
+        }
+    }
+    const QStringList unpack { "unzip", "-o", "-q", file, "-d", dir };
+    const auto u = host( unpack );
+    if ( u.getExitCode() != 0 )
+    {
+        return JobResult::error( tr( "Unpack failed" ), u.getOutput() );
+    }
+    // A bundle may hold everything in one top-level folder
+    const QStringList top = QDir( dir ).entryList( QDir::AllEntries | QDir::NoDotAndDotDot );
+    assetsDir = ( top.size() == 1 && QFileInfo( dir + '/' + top.first() ).isDir() ) ? dir + '/' + top.first() : dir;
+    gs->insert( "distroprofileAssets", assetsDir );
+    return JobResult::ok();
+}
+
+JobResult
 DistroProfileJob::writeRegdom( const Context& ctx )
 {
-    QString code = m_regdom.toUpper();
+    QString code = ClaudeInstall::JobQueue::instance()->globalStorage()->value( m_regdomKey ).toString().split( ',' ).first().trimmed().toUpper();
+    if ( code == QLatin1String( "AUTO" ) )
+    {
+        code.clear();
+    }
+    if ( code.isEmpty() )
+    {
+        code = m_regdom.toUpper();
+    }
     if ( code.isEmpty() )
     {
         // Derive the country from the chosen time zone (zone.tab: CC, coordinates, TZ)
@@ -283,12 +347,52 @@ DistroProfileJob::writeRegdom( const Context& ctx )
     }
 
     QDir().mkpath( ctx.root + "/etc/conf.d" );
-    QFile out( ctx.root + "/etc/conf.d/wireless-regdom" );
+    const QString path = ctx.root + "/etc/conf.d/wireless-regdom";
+
+    // Keep the file the profile copied (the full list of codes): only the active line changes.
+    QStringList lines;
+    {
+        QFile in( path );
+        if ( in.open( QIODevice::ReadOnly | QIODevice::Text ) )
+        {
+            lines = QString::fromUtf8( in.readAll() ).split( '\n' );
+        }
+    }
+    static const QRegularExpression codeLine( QStringLiteral( "^#?\\s*WIRELESS_REGDOM=\"([A-Z0-9]{2})\"\\s*$" ) );
+    bool found = false;
+    for ( QString& line : lines )
+    {
+        const auto m = codeLine.match( line );
+        if ( m.hasMatch() )
+        {
+            const bool wanted = m.captured( 1 ) == code;
+            found = found || wanted;
+            line = QStringLiteral( "%1WIRELESS_REGDOM=\"%2\"" ).arg( wanted ? QString() : QStringLiteral( "#" ), m.captured( 1 ) );
+        }
+    }
+    if ( lines.isEmpty() )
+    {
+        lines << QStringLiteral( "# Written by ClaudeInstall" );
+    }
+    if ( !found )
+    {
+        while ( !lines.isEmpty() && lines.last().isEmpty() )
+        {
+            lines.removeLast();
+        }
+        lines << QStringLiteral( "WIRELESS_REGDOM=\"%1\"" ).arg( code );
+    }
+    if ( !lines.last().isEmpty() )
+    {
+        lines << QString();
+    }
+
+    QFile out( path );
     if ( !out.open( QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text ) )
     {
         return JobResult::error( tr( "Wireless regulatory domain" ), tr( "Cannot write %1." ).arg( out.fileName() ) );
     }
-    QTextStream( &out ) << "# Written by ClaudeInstall\nWIRELESS_REGDOM=\"" << code << "\"\n";
+    out.write( lines.join( '\n' ).toUtf8() );
     cDebug() << "Wireless regulatory domain set to" << code;
     return JobResult::ok();
 }
@@ -298,6 +402,14 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
 {
     const QString type = ClaudeInstall::getString( step, "type" );
     const bool optional = ClaudeInstall::getBool( step, "optional", false );
+
+    // "when: NAME" skips the step while the profile variable NAME is empty
+    const QString when = ClaudeInstall::getString( step, "when" );
+    if ( !when.isEmpty() && ctx.extra.value( when ).isEmpty() )
+    {
+        return JobResult::ok();
+    }
+
     auto soften = [ & ]( JobResult r ) -> JobResult
     {
         if ( !r && optional )
@@ -461,6 +573,11 @@ DistroProfileJob::exec()
     {
         return JobResult::error( tr( "No target" ), tr( "globalstorage has no usable \"rootMountPoint\"." ) );
     }
+    auto fetched = ensureAssets( ctx.assets );
+    if ( !fetched )
+    {
+        return fetched;
+    }
 
     // The chooser stores a comma-separated list of ids; one distro is installed.
     const QString id = gs->value( m_profileKey ).toString().split( ',' ).first().trimmed();
@@ -511,6 +628,9 @@ DistroProfileJob::setConfigurationMap( const QVariantMap& configurationMap )
     m_assetsDir = ClaudeInstall::getString( configurationMap, "assetsDir", QStringLiteral( "/usr/share/claudeinstall/needed-files" ) );
     m_profileKey = ClaudeInstall::getString( configurationMap, "profileKey", QStringLiteral( "packagechooser_distro" ) );
     m_phase = ClaudeInstall::getString( configurationMap, "phase", QStringLiteral( "install" ) );
+    m_assetsUrl = ClaudeInstall::getString( configurationMap, "assetsUrl" );
+    m_assetsSha256 = ClaudeInstall::getString( configurationMap, "assetsSha256" ).toLower();
+    m_regdomKey = ClaudeInstall::getString( configurationMap, "regdomKey", QStringLiteral( "packagechooser_regdom" ) );
     m_regdom = ClaudeInstall::getString( configurationMap, "wirelessRegdom" );
     m_retries = ClaudeInstall::getInteger( configurationMap, "retries", 3 );
 }

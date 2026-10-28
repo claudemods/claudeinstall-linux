@@ -65,9 +65,13 @@ private:
     ClaudeInstall::JobResult bootstrap( const QString& root, QStringList packages );
     ClaudeInstall::JobResult writeRegdom( const Context& ctx );
     void refreshHostPackageLists() const;
+    ClaudeInstall::JobResult ensureAssets( QString& assetsDir );
 
     QString m_profilesDir;
     QString m_assetsDir;
+    QString m_assetsUrl;
+    QString m_assetsSha256;
+    QString m_regdomKey;
     QString m_profileKey;
     QString m_phase;
     QString m_regdom;

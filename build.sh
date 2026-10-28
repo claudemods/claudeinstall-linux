@@ -97,12 +97,16 @@ install_config() {
     for _p in "$SRCDIR"/profiles/*.conf; do
       $SUDO install -Dm644 "$_p" "$1/usr/share/claudeinstall/profiles/$(basename "$_p")"
     done
-    # your needed-files/ (grub/plymouth/sddm themes, pacman.conf, pacman.d.zip, tweaks scripts ...)
-    if [ -d "$SRCDIR/needed-files" ]; then
+    $SUDO install -Dm644 "$SRCDIR/packagechooser-regdom.conf" "$_d/modules/packagechooser-regdom.conf"
+    # The small local files (pacman.conf, pacman.d.zip, tweak scripts ...) come from needed-files/
+    # next to this script; the big theme / tool zips are downloaded by the profiles at install time.
+    # Elsewhere: NEEDED_FILES=/path/to/needed-files ./build.sh --claudemodsdistrosonline ...
+    _nf="${NEEDED_FILES:-$SRCDIR/needed-files}"
+    if [ -d "$_nf" ]; then
       $SUDO mkdir -p "$1/usr/share/claudeinstall/needed-files"
-      $SUDO cp -a "$SRCDIR/needed-files/." "$1/usr/share/claudeinstall/needed-files/"
+      $SUDO cp -a "$_nf/." "$1/usr/share/claudeinstall/needed-files/"
     else
-      echo "! $SRCDIR/needed-files is missing: profiles will fail on their copy steps until it is added" >&2
+      echo "! $_nf not found: the profiles' copy steps will fail. Put needed-files/ next to build.sh or set NEEDED_FILES=/path" >&2
     fi
     $SUDO install -Dm755 "$SRCDIR/claudeinstall-pkgfix" "$1/usr/bin/claudeinstall-pkgfix"
   elif [ "$MODE" = clone ]; then
