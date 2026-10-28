@@ -24,8 +24,14 @@
 #include <QMutex>
 #include <QThread>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <numeric>
 #include <optional>
+#include <thread>
 #include <unistd.h>  // for close()
 
 namespace
@@ -437,7 +443,34 @@ public:
                 o.refresh();  // So next time it shows the function header again
                 emitProgress( 0.0 );  // 0% for *this job*
                 connect( jobitem.job.data(), &Job::progress, this, &JobThread::emitProgress );
+
+                // Long jobs sit at one percentage for minutes: every 10 seconds say what is
+                // running and for how long, in the log and in the progress view.
+                std::mutex beatMutex;
+                std::condition_variable beatWake;
+                bool beatStop = false;
+                std::thread heartbeat(
+                    [ & ]
+                    {
+                        const auto started = std::chrono::steady_clock::now();
+                        std::unique_lock< std::mutex > lock( beatMutex );
+                        while ( !beatWake.wait_for( lock, std::chrono::seconds( 10 ), [ & ] { return beatStop; } ) )
+                        {
+                            const auto secs
+                                = std::chrono::duration_cast< std::chrono::seconds >( std::chrono::steady_clock::now() - started )
+                                      .count();
+                            emitHeartbeat( jobitem, int( secs ) );
+                        }
+                    } );
+
                 auto result = jobitem.job->exec();
+
+                {
+                    std::lock_guard< std::mutex > lock( beatMutex );
+                    beatStop = true;
+                }
+                beatWake.notify_all();
+                heartbeat.join();
                 if ( !failureEncountered && !result )
                 {
                     // so this is the first failure
@@ -478,12 +511,38 @@ public:
     }
 
 private:
+    /** @brief The "still working" report, called every 10 seconds from a helper thread
+     *
+     * Logs the job and how long it has been running, and repeats the job's own status
+     * with the elapsed time so the progress view changes even when the job reports nothing.
+     */
+    void emitHeartbeat( const WeightedJob& jobitem, int seconds ) const
+    {
+        QString status = jobitem.job->prettyStatusMessage();
+        if ( status.isEmpty() )
+        {
+            status = jobitem.job->prettyName();
+        }
+        const QString elapsed = seconds >= 60 ? tr( "%1 min %2 s" ).arg( seconds / 60 ).arg( seconds % 60 )
+                                              : tr( "%1 s" ).arg( seconds );
+        cDebug() << "Still working:" << jobitem.job->prettyName() << '-' << status << '(' << elapsed << ')';
+
+        const qreal pct = m_lastPercentage.load();
+        const qreal progress = ( jobitem.cumulative + jobitem.weight * pct ) / m_overallQueueWeight;
+        QMetaObject::invokeMethod( m_queue,
+                                   "progress",
+                                   Qt::QueuedConnection,
+                                   Q_ARG( qreal, progress ),
+                                   Q_ARG( QString, tr( "%1 - still working, %2" ).arg( status, elapsed ) ) );
+    }
+
     /* This is called **only** from run(), while m_runMutex is
      * already locked, so we can use the m_runningJobs member safely.
      */
     void emitProgress( qreal percentage ) const
     {
         percentage = qBound( 0.0, percentage, 1.0 );
+        m_lastPercentage.store( percentage );
 
         QString message;
         qreal progress = 0.0;
@@ -528,6 +587,7 @@ private:
     std::unique_ptr< WeightedJobList > m_queuedJobs = std::make_unique< WeightedJobList >();
 
     JobQueue* m_queue;
+    mutable std::atomic< qreal > m_lastPercentage { 0.0 };  ///< Last progress of the running job, for the heartbeat
     int m_jobIndex = 0;  ///< Index into m_runningJobs
     qreal m_overallQueueWeight = 0.0;  ///< cumulation when **all** the jobs are done
 };

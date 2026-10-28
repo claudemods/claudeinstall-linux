@@ -98,6 +98,10 @@ install_config() {
       $SUDO install -Dm644 "$_p" "$1/usr/share/claudeinstall/profiles/$(basename "$_p")"
     done
     $SUDO install -Dm644 "$SRCDIR/packagechooser-regdom.conf" "$_d/modules/packagechooser-regdom.conf"
+    # the tile pictures of the Distribution and Wireless region pages
+    for _i in "$SRCDIR"/images/*.png; do
+      $SUDO install -Dm644 "$_i" "$1/usr/share/claudeinstall/images/$(basename "$_i")"
+    done
     # The small local files (pacman.conf, pacman.d.zip, tweak scripts ...) come from needed-files/
     # next to this script; the big theme / tool zips are downloaded by the profiles at install time.
     # Elsewhere: NEEDED_FILES=/path/to/needed-files ./build.sh --claudemodsdistrosonline ...

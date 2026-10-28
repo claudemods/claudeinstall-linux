@@ -13,7 +13,9 @@
 #include "DllMacro.h"
 #include "utils/PluginFactory.h"
 
+#include <QElapsedTimer>
 #include <QMap>
+#include <QMutex>
 #include <QObject>
 #include <QStringList>
 #include <QVariantMap>
@@ -43,6 +45,8 @@ public:
     ~DistroProfileJob() override;
 
     QString prettyName() const override;
+    /// What the job is doing right now (updated from every step; the queue also shows it every 10 s)
+    QString prettyStatusMessage() const override;
 
     ClaudeInstall::JobResult exec() override;
 
@@ -64,8 +68,19 @@ private:
     ClaudeInstall::JobResult runStep( const QVariantMap& step, const Context& ctx );
     ClaudeInstall::JobResult bootstrap( const QString& root, QStringList packages );
     ClaudeInstall::JobResult writeRegdom( const Context& ctx );
-    void refreshHostPackageLists() const;
+    void refreshHostPackageLists();
     ClaudeInstall::JobResult ensureAssets( QString& assetsDir );
+
+    /// Say what is going on: logged, and shown in the progress view
+    void setStatus( const QString& status );
+    /// Runs a command, handing every line it prints to the status; returns its exit code and output
+    int runStreaming( const QStringList& cmd, QString& output );
+
+    mutable QMutex m_statusMutex;
+    QString m_status;
+    QElapsedTimer m_clock;
+    qint64 m_lastEmitMs = -10000;
+    double m_lastProgress = 0.0;
 
     QString m_profilesDir;
     QString m_assetsDir;

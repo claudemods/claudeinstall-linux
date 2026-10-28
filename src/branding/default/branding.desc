@@ -48,7 +48,7 @@ windowExpanding:    normal
 # This setting is ignored if "fullscreen" is selected for
 # *windowExpanding*, above. If not set, use constants defined
 # in ClaudeInstallUtilsGui, 800x520.
-windowSize: 1100px,520px
+windowSize: 1100px,640px
 
 # Placement of ClaudeInstall window. Either "center" or "free".
 # Whether "center" actually works does depend on the window
@@ -165,10 +165,10 @@ strings:
 # These filenames can also use substitutions from os-release (see above).
 images:
     # productBanner:       "banner.png"
-    productIcon:         "mascot.svg"
-    productLogo:         "mascot.svg"
+    productIcon:         "logo.svg"
+    productLogo:         "logo.svg"
     # productWallpaper:    "wallpaper.png"
-    productWelcome:      "languages.png"
+    productWelcome:      "welcome.png"
 
 # Colors for text and background components.
 #
@@ -182,10 +182,10 @@ images:
 # branding component also ships a stylesheet.qss. Then they are
 # the corresponding CSS attributes of #sidebarApp.
 style:
-   SidebarBackground:        "#292F34"
-   SidebarText:              "#FFFFFF"
-   SidebarTextCurrent:       "#292F34"
-   SidebarBackgroundCurrent: "#D35400"
+   SidebarBackground:        "#0B1F3F"
+   SidebarText:              "#CFE6FF"
+   SidebarTextCurrent:       "#FFFFFF"
+   SidebarBackgroundCurrent: "#1F7AE0"
 
 ### SLIDESHOW
 #

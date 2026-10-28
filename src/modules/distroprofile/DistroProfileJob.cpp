@@ -20,6 +20,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMutexLocker>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -104,6 +106,67 @@ DistroProfileJob::prettyName() const
 }
 
 QString
+DistroProfileJob::prettyStatusMessage() const
+{
+    QMutexLocker lock( &m_statusMutex );
+    return m_status;
+}
+
+void
+DistroProfileJob::setStatus( const QString& status )
+{
+    {
+        QMutexLocker lock( &m_statusMutex );
+        m_status = status;
+    }
+    // Lines can arrive many times a second: tell the queue and the log about once a second
+    if ( !m_clock.isValid() || m_clock.elapsed() - m_lastEmitMs >= 1000 )
+    {
+        m_lastEmitMs = m_clock.isValid() ? m_clock.elapsed() : 0;
+        cDebug() << "Status:" << status;
+        emit progress( m_lastProgress );
+    }
+}
+
+int
+DistroProfileJob::runStreaming( const QStringList& cmd, QString& output )
+{
+    QProcess proc;
+    proc.setProcessChannelMode( QProcess::MergedChannels );
+    proc.start( cmd.first(), cmd.mid( 1 ) );
+    if ( !proc.waitForStarted( 30000 ) )
+    {
+        output = tr( "Cannot start %1." ).arg( cmd.first() );
+        return -1;
+    }
+
+    const QString prefix = prettyStatusMessage();
+    QString pending;
+    auto consume = [ & ]( const QByteArray& chunk )
+    {
+        output += QString::fromUtf8( chunk );
+        pending += QString::fromUtf8( chunk );
+        // pacman redraws its progress with carriage returns: every piece is a line
+        const QStringList parts = pending.split( QRegularExpression( QStringLiteral( "[\\r\\n]" ) ) );
+        pending = parts.last();
+        for ( int i = 0; i + 1 < parts.size(); ++i )
+        {
+            const QString line = parts.at( i ).trimmed();
+            if ( !line.isEmpty() )
+            {
+                setStatus( prefix + QStringLiteral( ": " ) + line.left( 110 ) );
+            }
+        }
+    };
+    while ( !proc.waitForFinished( 300 ) )
+    {
+        consume( proc.readAll() );
+    }
+    consume( proc.readAll() );
+    return proc.exitStatus() == QProcess::NormalExit ? proc.exitCode() : -1;
+}
+
+QString
 DistroProfileJob::expand( const QString& text, const Context& ctx ) const
 {
     QString out = text;
@@ -179,10 +242,11 @@ DistroProfileJob::loadProfile( const QString& id, QVariantMap& out, QString& err
 }
 
 void
-DistroProfileJob::refreshHostPackageLists() const
+DistroProfileJob::refreshHostPackageLists()
 {
     host( { "rm", "-f", "/var/lib/pacman/db.lck" } );
     // -Syy forces a re-download, so a list that went stale is replaced
+    setStatus( tr( "Refreshing the package lists", "@status" ) );
     host( { "pacman", "-Syy", "--noconfirm" } );
     if ( !QFileInfo::exists( "/etc/pacman.d/gnupg/trustdb.gpg" ) )
     {
@@ -204,14 +268,16 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
             return JobResult::error( tr( "Nothing to install" ), tr( "The profile has no packages left to install." ) );
         }
         const QStringList cmd = QStringList { "pacstrap", "-K", root } + packages;
-        const auto r = ClaudeInstall::System::runCommand( RunLocation::RunInHost, cmd );
-        if ( r.getExitCode() == 0 )
+        setStatus( tr( "Installing %1 packages with pacstrap (attempt %2)", "@status" ).arg( packages.size() ).arg( attempt + 1 ) );
+        QString out;
+        const int code = runStreaming( cmd, out );
+        if ( code == 0 )
         {
             break;
         }
 
         // Names that vanished from the repositories are left out, not fatal.
-        const QStringList missing = missingPackages( r.getOutput() );
+        const QStringList missing = missingPackages( out );
         QStringList kept;
         for ( const QString& p : packages )
         {
@@ -229,8 +295,12 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
         }
         if ( attempt >= m_retries )
         {
-            return failed( cmd, r );
+            cWarning() << "Command" << cmd.join( ' ' ) << "failed with exit code" << code;
+            cDebug() << out;
+            return JobResult::error( tr( "Setup step failed" ),
+                                     tr( "The command <pre>%1</pre> returned error code %2." ).arg( cmd.join( ' ' ) ).arg( code ) );
         }
+        setStatus( tr( "pacstrap failed; refreshing the package lists and retrying", "@status" ) );
         cWarning() << "pacstrap failed; refreshing the package lists and retrying";
         refreshHostPackageLists();
         QThread::sleep( 3 );
@@ -410,6 +480,30 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
         return JobResult::ok();
     }
 
+    // Say what is happening, so the progress view and the log are never silent
+    {
+        QString subject = ClaudeInstall::getString( step, "from" );
+        for ( const char* key : { "command", "url", "path", "to" } )
+        {
+            if ( subject.isEmpty() )
+            {
+                subject = ClaudeInstall::getString( step, key );
+            }
+        }
+        if ( subject.isEmpty() )
+        {
+            subject = step.value( "units" ).toStringList().join( ", " );
+        }
+        subject = expand( subject.simplified(), ctx );
+        static const QMap< QString, QString > verbs {
+            { "copy", QStringLiteral( "Copying" ) },       { "mkdir", QStringLiteral( "Creating" ) },
+            { "remove", QStringLiteral( "Removing" ) },    { "enable", QStringLiteral( "Enabling" ) },
+            { "run", QStringLiteral( "Running" ) },        { "runAsUser", QStringLiteral( "Running as the user" ) },
+            { "hostRun", QStringLiteral( "Running" ) },    { "download", QStringLiteral( "Downloading" ) },
+            { "write", QStringLiteral( "Writing" ) },      { "regdom", QStringLiteral( "Setting the wireless region" ) } };
+        setStatus( verbs.value( type, type ) + ' ' + subject.left( 90 ) );
+    }
+
     auto soften = [ & ]( JobResult r ) -> JobResult
     {
         if ( !r && optional )
@@ -515,11 +609,14 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
             return JobResult::error( tr( "Download" ), tr( "Cannot create a temporary directory." ) );
         }
         const QString file = tmp.filePath( QFileInfo( QUrl( url ).path() ).fileName() );
-        const QStringList get { "curl", "-fL", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "30", "-o", file, url };
-        const auto r = host( get );
-        if ( r.getExitCode() != 0 )
+        // -# prints a progress bar: its percentage is shown as the status
+        const QStringList get { "curl", "-fL", "-#", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "30", "-o", file, url };
+        QString curlOutput;
+        const int curlCode = runStreaming( get, curlOutput );
+        if ( curlCode != 0 )
         {
-            return soften( failed( get, r ) );
+            cWarning() << "Command" << get.join( ' ' ) << "failed with exit code" << curlCode;
+            return soften( JobResult::error( tr( "Download failed" ), tr( "Could not download %1 (curl error %2)." ).arg( url ).arg( curlCode ) ) );
         }
         if ( !sha.isEmpty() )
         {
@@ -535,6 +632,31 @@ DistroProfileJob::runStep( const QVariantMap& step, const Context& ctx )
                                                                               : QStringList { "cp", "-a", file, dest };
         const auto u = host( unpack );
         return soften( u.getExitCode() == 0 ? JobResult::ok() : failed( unpack, u ) );
+    }
+    if ( type == QLatin1String( "write" ) )
+    {
+        // A small file written straight from the profile (no helper script needed)
+        const QString path = ctx.root + expand( ClaudeInstall::getString( step, "path" ), ctx );
+        if ( !isInside( ctx.root, path ) )
+        {
+            return JobResult::error( tr( "Bad profile" ), tr( "Write step leaves the target: %1" ).arg( path ) );
+        }
+        QDir().mkpath( QFileInfo( path ).path() );
+        QFile out( path );
+        const auto flags = QIODevice::WriteOnly | QIODevice::Text
+            | ( ClaudeInstall::getBool( step, "append", false ) ? QIODevice::Append : QIODevice::Truncate );
+        if ( !out.open( flags ) )
+        {
+            return soften( JobResult::error( tr( "Cannot write a file" ), path ) );
+        }
+        out.write( expand( ClaudeInstall::getString( step, "content" ), ctx ).toUtf8() );
+        out.close();
+        const QString mode = ClaudeInstall::getString( step, "mode" );
+        if ( !mode.isEmpty() )
+        {
+            host( { "chmod", mode, path } );
+        }
+        return JobResult::ok();
     }
     if ( type == QLatin1String( "regdom" ) )
     {
@@ -555,7 +677,8 @@ DistroProfileJob::runSteps( const QVariantList& steps, const Context& ctx )
         {
             return r;
         }
-        emit progress( double( ++done ) / double( qMax( 1, int( steps.size() ) ) ) );
+        m_lastProgress = double( ++done ) / double( qMax( 1, int( steps.size() ) ) );
+        emit progress( m_lastProgress );
     }
     return JobResult::ok();
 }
@@ -564,6 +687,8 @@ JobResult
 DistroProfileJob::exec()
 {
     auto* gs = ClaudeInstall::JobQueue::instance()->globalStorage();
+    m_clock.start();
+    setStatus( prettyName() );
 
     Context ctx;
     ctx.root = gs->value( "rootMountPoint" ).toString();

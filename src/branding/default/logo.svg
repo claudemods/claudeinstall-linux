@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a2a66"/>
+      <stop offset="1" stop-color="#1f8fff"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="26" fill="url(#bg)"/>
+  <ellipse cx="38" cy="14" rx="70" ry="46" fill="#ffffff" fill-opacity="0.13"/>
+  <!-- an open ring: the C of ClaudeInstall -->
+  <path d="M 84 40 A 32 32 0 1 0 84 88" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round"/>
+  <!-- the install arrow -->
+  <path d="M 64 48 L 64 74 M 52 63 L 64 76 L 76 63" fill="none" stroke="#7fd0ff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

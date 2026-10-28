@@ -12,6 +12,7 @@
 #include "TuiWidgets.h"
 
 #include <ftxui/component/event.hpp>
+#include <ftxui/component/screen_interactive.hpp>
 
 #include <algorithm>
 
@@ -126,6 +127,13 @@ PackageChooserTuiStep::onActivate()
             m_cursor = index.row();
         }
     }
+    // A required choice with no default: start on the first entry so Next is never stuck disabled
+    if ( !m_defaultApplied && !hasSelection() && model && model->packageCount() > 0 && !multiple()
+         && m_config->mode() == PackageChooserMode::Required && !m_chosen.empty() )
+    {
+        m_chosen[ 0 ] = 1;
+        m_cursor = 0;
+    }
     m_defaultApplied = true;
     emit nextStatusChanged( isNextEnabled() );
 }
@@ -191,6 +199,12 @@ PackageChooserTuiStep::createComponent()
                 rows.push_back( row );
             }
 
+            if ( rows.empty() )
+            {
+                rows.push_back( text( tr( "No choices were loaded for this page. See the log file for the reason.", "@label" ).toStdString() )
+                                | color( Color::Red ) );
+            }
+
             // The description: of the item under the cursor, or of the module as a whole
             const PackageItem* shown = &m_config->introductionPackage();
             if ( packages && m_cursor >= 0 && m_cursor < packages->packageCount() )
@@ -203,7 +217,7 @@ PackageChooserTuiStep::createComponent()
                         separator(),
                         text( shown->name.get().toStdString() ) | bold,
                         ClaudeInstall::Tui::paragraphOf( shown->description.get() ),
-                        text( ( tr( "Up and down move; space chooses.", "@label" ) ).toStdString() ) | dim } ) );
+                        text( ( tr( "Up and down move; space chooses; Enter chooses and goes on.", "@label" ) ).toStdString() ) | dim } ) );
         } );
 
     return CatchEvent( view,
@@ -218,9 +232,29 @@ PackageChooserTuiStep::createComponent()
                            {
                                m_cursor = qMin( qMax( 0, count - 1 ), m_cursor + 1 );
                            }
-                           else if ( event == Event::Character( ' ' ) || event == Event::Return )
+                           else if ( event == Event::Character( ' ' ) )
                            {
                                toggle( m_cursor );
+                           }
+                           else if ( event == Event::Return )
+                           {
+                               // Enter picks the highlighted entry and goes to the next page (as the welcome page does)
+                               if ( !multiple() && m_cursor >= 0 && size_t( m_cursor ) < m_chosen.size() && !m_chosen[ size_t( m_cursor ) ] )
+                               {
+                                   toggle( m_cursor );
+                               }
+                               else if ( multiple() )
+                               {
+                                   toggle( m_cursor );
+                                   return true;
+                               }
+                               if ( isNextEnabled() )
+                               {
+                                   if ( auto* screen = ScreenInteractive::Active() )
+                                   {
+                                       screen->PostEvent( Event::Special( "\x0E" ) );  // Ctrl-N, see TuiApplication
+                                   }
+                               }
                            }
                            else
                            {

@@ -15,7 +15,84 @@
 #include "utils/Logger.h"
 #include "utils/Retranslator.h"
 
+#include <QHash>
 #include <QLabel>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
+#include <QStyledItemDelegate>
+
+namespace
+{
+/** @brief Draws each choice as a tile: picture on top, name below
+ *
+ * The selected tile is filled blue, the one under the mouse is lightened, so the
+ * grid reads at a glance instead of being a plain list squeezed to one side.
+ */
+class TileDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint( const QStyleOptionViewItem&, const QModelIndex& ) const override { return QSize( 200, 176 ); }
+
+    void paint( QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index ) const override
+    {
+        painter->save();
+        painter->setRenderHint( QPainter::Antialiasing, true );
+        painter->setRenderHint( QPainter::SmoothPixmapTransform, true );
+
+        const QRectF card = QRectF( option.rect ).adjusted( 6, 6, -6, -6 );
+        const bool selected = option.state & QStyle::State_Selected;
+        const bool hovered = option.state & QStyle::State_MouseOver;
+        const QColor accent( 0x1f, 0x7a, 0xe0 );
+
+        QPainterPath path;
+        path.addRoundedRect( card, 10, 10 );
+        QColor fill = option.palette.color( QPalette::Base );
+        if ( selected )
+        {
+            fill = accent;
+        }
+        else if ( hovered )
+        {
+            fill = accent.lighter( 190 );
+        }
+        painter->fillPath( path, fill );
+        painter->setPen( QPen( selected ? accent.darker( 130 ) : option.palette.color( QPalette::Mid ), selected ? 2 : 1 ) );
+        painter->drawPath( path );
+
+        // The picture, kept in proportion
+        const QString file = index.data( PackageListModel::ScreenshotRole ).toString();
+        QPixmap picture = m_cache.value( file );
+        if ( picture.isNull() && !file.isEmpty() )
+        {
+            picture = QPixmap( file );
+            m_cache.insert( file, picture );
+        }
+        const QRectF pictureArea = card.adjusted( 12, 10, -12, -50 );
+        if ( !picture.isNull() )
+        {
+            const QPixmap scaled = picture.scaled( pictureArea.size().toSize(), Qt::KeepAspectRatio, Qt::SmoothTransformation );
+            painter->drawPixmap( QPointF( pictureArea.center().x() - scaled.width() / 2.0,
+                                          pictureArea.center().y() - scaled.height() / 2.0 ),
+                                 scaled );
+        }
+
+        // The name, up to two lines
+        QFont font = option.font;
+        font.setBold( true );
+        painter->setFont( font );
+        painter->setPen( selected ? Qt::white : option.palette.color( QPalette::Text ) );
+        const QRectF textArea( card.left() + 8, card.bottom() - 46, card.width() - 16, 40 );
+        painter->drawText( textArea, Qt::AlignHCenter | Qt::AlignVCenter | Qt::TextWordWrap, index.data( Qt::DisplayRole ).toString() );
+        painter->restore();
+    }
+
+private:
+    mutable QHash< QString, QPixmap > m_cache;
+};
+}  // namespace
 
 PackageChooserPage::PackageChooserPage( PackageChooserMode mode, QWidget* parent )
     : QWidget( parent )
@@ -43,7 +120,20 @@ PackageChooserPage::PackageChooserPage( PackageChooserMode mode, QWidget* parent
         ui->products->setSelectionMode( QAbstractItemView::ExtendedSelection );
     }
 
-    ui->products->setMinimumWidth( 10 * ClaudeInstall::defaultFontHeight() );
+    // A wrapping grid of tiles filling the page, not a list on one side
+    auto* products = ui->products;
+    products->setViewMode( QListView::IconMode );
+    products->setFlow( QListView::LeftToRight );
+    products->setWrapping( true );
+    products->setResizeMode( QListView::Adjust );
+    products->setMovement( QListView::Static );
+    products->setUniformItemSizes( true );
+    products->setSpacing( 4 );
+    products->setMouseTracking( true );
+    products->setHorizontalScrollBarPolicy( Qt::ScrollBarAlwaysOff );
+    products->setFrameShape( QFrame::NoFrame );
+    products->setItemDelegate( new TileDelegate( products ) );
+    products->setMinimumHeight( 8 * ClaudeInstall::defaultFontHeight() );
 }
 
 void
