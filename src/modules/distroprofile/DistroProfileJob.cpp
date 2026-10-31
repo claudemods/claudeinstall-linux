@@ -31,7 +31,11 @@
 
 #include <QVector>
 
+#include <crypt.h>
+
 #include <algorithm>
+#include <cstring>
+#include <memory>
 #include <utility>
 
 using ClaudeInstall::JobResult;
@@ -91,8 +95,64 @@ quietInTarget( const QString& root, const QStringList& args, const QString& stdI
     return process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
 }
 
+/// What would stop @p user from logging in with @p password on the new system; empty when all is well.
+/// The password is checked against the hash in the target's /etc/shadow; the account must not be
+/// locked, its shell must be usable, and the home directory must belong to the user and be writable by it.
+QStringList
+verifyUserAccount( const QString& root, const QString& user, const QString& password, const QString& home )
+{
+    QStringList problems;
+
+    QString shadow;
+    if ( quietInTarget( root, { "getent", "shadow", user }, QString(), &shadow ) != 0 )
+    {
+        return { QStringLiteral( "no shadow entry" ) };
+    }
+    const QString hash = shadow.trimmed().section( ':', 1, 1 );
+    if ( hash.isEmpty() || hash.startsWith( '!' ) || hash.startsWith( '*' ) )
+    {
+        problems << QStringLiteral( "account is locked or has no password" );
+    }
+    else
+    {
+        auto data = std::make_unique< crypt_data >();
+        std::memset( data.get(), 0, sizeof( crypt_data ) );
+        const char* computed = crypt_r( password.toUtf8().constData(), hash.toUtf8().constData(), data.get() );
+        if ( !computed || hash != QString::fromUtf8( computed ) )
+        {
+            problems << QStringLiteral( "the password does not match" );
+        }
+    }
+
+    QString shell;
+    quietInTarget( root, { "getent", "passwd", user }, QString(), &shell );
+    const QString shellPath = shell.trimmed().section( ':', 6, 6 );
+    if ( shellPath.isEmpty() || !QFileInfo::exists( root + shellPath ) || shellPath.endsWith( QLatin1String( "nologin" ) ) )
+    {
+        problems << QStringLiteral( "login shell %1 is not usable" ).arg( shellPath );
+    }
+
+    QString owner;
+    quietInTarget( root, { "stat", "-c", "%U", home }, QString(), &owner );
+    if ( owner.trimmed() != user )
+    {
+        problems << QStringLiteral( "home directory is owned by %1" ).arg( owner.trimmed() );
+    }
+    QString rootOwned;
+    quietInTarget( root, { "find", home, "-user", "root", "-print", "-quit" }, QString(), &rootOwned );
+    if ( !rootOwned.trimmed().isEmpty() )
+    {
+        problems << QStringLiteral( "%1 is owned by root" ).arg( rootOwned.trimmed() );
+    }
+    if ( quietInTarget( root, { "runuser", "-u", user, "--", "test", "-w", home } ) != 0 )
+    {
+        problems << QStringLiteral( "the user cannot write to the home directory" );
+    }
+    return problems;
+}
+
 /// Last step before unmounting: delete the user inside the new system, create it again and
-/// set the password with chpasswd (password on stdin, nothing logged).
+/// set the password with chpasswd, then check that the login works (nothing is logged).
 JobResult
 resetUserAccount( const QString& root, const QString& user, const QString& password )
 {
@@ -143,17 +203,37 @@ resetUserAccount( const QString& root, const QString& user, const QString& passw
         return bad( QCoreApplication::translate( "DistroProfileJob", "useradd failed." ) );
     }
 
-    if ( quietInTarget( root, { "chpasswd" }, user + QLatin1Char( ':' ) + password + QLatin1Char( '\n' ) ) != 0 )
+    // The password goes in exactly as it is typed by hand: chpasswd <<< 'user:password'
+    // (single quotes in the password are escaped for bash)
+    QString quoted = user + QLatin1Char( ':' ) + password;
+    quoted.replace( QLatin1Char( '\'' ), QStringLiteral( "'\\''" ) );
+    const QStringList setPassword { "bash", "-c", QStringLiteral( "chpasswd <<< '%1'" ).arg( quoted ) };
+    if ( quietInTarget( root, setPassword ) != 0 )
     {
         return bad( QCoreApplication::translate( "DistroProfileJob", "chpasswd failed." ) );
     }
 
-    // The home directory survived userdel; give it to the new account (its group id may differ)
-    QString gid;
-    quietInTarget( root, { "id", "-g", user }, QString(), &gid );
-    if ( !gid.trimmed().isEmpty() )
+    // The home directory survived userdel (and may hold files made as root by earlier steps):
+    // it and everything in it belongs to the user and the user's login group
+    const auto fixHome = [ & ]() {
+        quietInTarget( root, { "mkdir", "-p", home } );
+        quietInTarget( root, { "chown", "-R", user + QLatin1Char( ':' ), home } );
+        quietInTarget( root, { "chmod", "700", home } );
+    };
+    fixHome();
+
+    // Check phase: log in to the new account the way the login screen will
+    const QStringList problems = verifyUserAccount( root, user, password, home );
+    if ( !problems.isEmpty() )
     {
-        quietInTarget( root, { "chown", "-R", uid + QLatin1Char( ':' ) + gid.trimmed(), home } );
+        // one repair attempt, then check again
+        quietInTarget( root, setPassword );
+        fixHome();
+        const QStringList again = verifyUserAccount( root, user, password, home );
+        if ( !again.isEmpty() )
+        {
+            return bad( QCoreApplication::translate( "DistroProfileJob", "Login check failed: %1" ).arg( again.join( QStringLiteral( "; " ) ) ) );
+        }
     }
     return JobResult::ok();
 }

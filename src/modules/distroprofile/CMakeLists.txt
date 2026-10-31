@@ -7,6 +7,8 @@ claudeinstall_add_plugin(distroprofile
     EXPORT_MACRO PLUGINDLLEXPORT_PRO
     SOURCES
         DistroProfileJob.cpp
+    LINK_PRIVATE_LIBRARIES
+        crypt
     REQUIRES
         mount
     WEIGHT 20
