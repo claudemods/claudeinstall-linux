@@ -43,15 +43,47 @@ can customise it through branding and configuration without patching the code.
 
 ## Quick start
 
+Building is two steps: set the installer up with the helper, then build it.
+
 ```bash
-./build.sh                       # asks: new system or clone? GUI, TUI or both?
+./build.sh            # 1. compiles the Qt6 setup helper (helper/) and opens it
+./build.sh build      # 2. builds the installer with the settings the helper saved
+```
+
+The **setup helper** is a small Qt6 application. It has four pages: installer type (new system,
+cloned system or claudemods distributions), interface (GUI, TUI or both), build options (install
+dependencies, clean build, install, package, test build, parallel jobs, build directory,
+`needed-files` folder, extra CMake arguments) and a review page. **Save** writes `build.config`
+next to `build.sh`; **Save & Build** also runs `./build.sh build` in a terminal window. The
+helper only needs Qt6 and CMake; `build.sh` installs them if they are missing. Run `build.sh`
+as your normal user so the helper can open on your desktop (it asks for `sudo` only when it
+installs packages).
+
+`build.config` is a plain `KEY=value` file (`MODE`, `INTERFACE`, `TEST`, `DEPS`, `CLEAN`,
+`INSTALL`, `PACKAGE`, `JOBS`, `BUILDDIR`, `NEEDED_FILES`, `CMAKE_ARGS`) that `build.sh` reads
+but never executes. You can edit it by hand, and command-line options override it.
+
+| Command | What it does |
+|---|---|
+| `./build.sh` or `./build.sh helper` | compile the setup helper and open it (`helper --no-launch` only compiles) |
+| `./build.sh build` | build the installer with `build.config` |
+| `./build.sh deps` | only install the build dependencies |
+| `./build.sh install` | build, then install (uses `sudo`) |
+| `./build.sh package` | build, then also create a package (`fpm` if present, else a tarball) |
+| `./build.sh config` | show the saved `build.config` |
+| `./build.sh clean` | remove the build and helper build directories |
+| `./build.sh help` | all commands and options |
+
+The old option style still works without the helper:
+
+```bash
 ./build.sh --clone --gui --install
 ./build.sh --new --tui --package
 ./build.sh --claudemodsdistrosonline --gui     # claudemods distributions (see below); or --tui / --both
 ```
 
 `build.sh` detects your distribution, installs the build dependencies, builds with
-CMake/Ninja, and can install the result or wrap it into a package. Run `./build.sh --help`
+CMake/Ninja, and can install the result or wrap it into a package. Run `./build.sh help`
 for all options.
 
 ### Supported distributions

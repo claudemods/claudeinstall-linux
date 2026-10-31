@@ -97,39 +97,30 @@ SetPasswordJob::exec()
         return ClaudeInstall::JobResult::ok();
     }
 
-    // crypt() returns null or a "*0" / "*1" marker when the salt is not supported: that would
-    // set an empty or locked password without any error. Try the library's best method first,
-    // then SHA512, and stop with an error if neither produces a real hash.
-    QString salt, encrypted;
-    for ( int attempt = 0; attempt < 2 && ( encrypted.size() < 13 || encrypted.startsWith( '*' ) ); ++attempt )
-    {
-        salt.clear();
-#ifdef HAVE_CRYPT_GENSALT
-        if ( attempt == 0 )
-        {
-            const char* generated = crypt_gensalt( NULL, 0, NULL, 0 );
-            salt = generated ? QString::fromLatin1( generated ) : QString();
-        }
-#endif
-        if ( salt.isEmpty() )
-        {
-            salt = sha512Salt( 16 );
-        }
-        const char* hashed = crypt( m_newPassword.toUtf8(), salt.toUtf8() );
-        encrypted = hashed ? QString::fromLatin1( hashed ) : QString();
-    }
-    if ( encrypted.size() < 13 || encrypted.startsWith( '*' ) )
+    // Let the target system hash the password itself: chpasswd inside the target uses the target's
+    // own libxcrypt / login.defs / PAM settings, so the hash is always one its login stack accepts.
+    // (Hashing with the live environment's crypt() and passing it to "usermod -p" is what the
+    // old code did.) The password goes in via stdin only, so it is never on a command line or in the log.
+    const QString line = m_userName + QLatin1Char( ':' ) + m_newPassword + QLatin1Char( '\n' );
+    auto result = ClaudeInstall::System::instance()->targetEnvCommand( { "chpasswd" }, QString(), line );
+    if ( result.getExitCode() )
     {
         return ClaudeInstall::JobResult::error( tr( "Cannot set password for user %1." ).arg( m_userName ),
-                                                tr( "The password could not be hashed (salt prefix %1)." ).arg( salt.left( 3 ) ) );
+                                                tr( "chpasswd terminated with error code %1." ).arg( result.getExitCode() ) );
     }
-    cDebug() << "Password for" << m_userName << "hashed with method" << encrypted.left( encrypted.indexOf( '$', 1 ) + 1 );
 
-    int ec = ClaudeInstall::System::instance()->targetEnvCall( { "usermod", "-p", encrypted, m_userName } );
-    if ( ec )
+    // Read the hash back: an empty or locked ("!" / "*") field means the login would be refused.
+    QString shadowLine;
+    if ( ClaudeInstall::System::instance()->targetEnvOutput( { "getent", "shadow", m_userName }, shadowLine ) == 0 )
     {
-        return ClaudeInstall::JobResult::error( tr( "Cannot set password for user %1." ).arg( m_userName ),
-                                            tr( "usermod terminated with error code %1." ).arg( ec ) );
+        const QString hash = shadowLine.section( ':', 1, 1 );
+        if ( hash.isEmpty() || hash.startsWith( '!' ) || hash.startsWith( '*' ) )
+        {
+            return ClaudeInstall::JobResult::error( tr( "Cannot set password for user %1." ).arg( m_userName ),
+                                                    tr( "The account is still locked or empty after chpasswd." ) );
+        }
+        cDebug() << "Password for" << m_userName << "set with hash method"
+                 << hash.left( hash.indexOf( '$', 1 ) + 1 );
     }
 
     return ClaudeInstall::JobResult::ok();

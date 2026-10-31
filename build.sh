@@ -2,9 +2,24 @@
 # SPDX-FileCopyrightText: no
 # SPDX-License-Identifier: CC0-1.0
 #
-# build.sh - install build dependencies for the running distro and build ClaudeInstall.
+# build.sh - set up, install build dependencies for and build ClaudeInstall.
 #
-# Usage: ./build.sh [options]
+# Usage: ./build.sh [command] [options]
+#
+# Commands:
+#   (none) | helper  compile the Qt6 setup helper (helper/) and open it. Use it to choose what to
+#                    build; it saves build.config next to this script. "helper --no-launch" only compiles.
+#   build            build the installer with the settings in build.config (options below override it)
+#   deps             only install build dependencies
+#   install          build, then install (uses sudo if not root)
+#   package          build, then also create a distro package
+#   config           show the saved build.config
+#   clean            remove the build and helper build directories
+#   help             this text
+#
+# Old style still works: ./build.sh --gui --install  (same as "build" with those options)
+#
+# Options for build / install / package:
 #   --deps-only      only install build dependencies
 #   --no-deps        skip installing dependencies
 #   --new | --clone | --claudemodsdistrosonline   new-system installer, clone of the running system,
@@ -29,10 +44,146 @@
 set -e
 
 SRCDIR=$(cd "$(dirname "$0")" && pwd)
-BUILDDIR=${BUILDDIR:-$SRCDIR/build}
-JOBS=${JOBS:-$(nproc 2>/dev/null || echo 2)}
+HELPER_SRC=$SRCDIR/helper
+HELPER_BUILD=${HELPER_BUILD:-$SRCDIR/build-helper}
+CONFIG=${BUILD_CONFIG:-$SRCDIR/build.config}
+
+SUDO=
+[ "$(id -u)" -ne 0 ] && SUDO=sudo
+
+# ---- distro detection (sets FAMILY) -----------------------------------------
+detect_family() {
+  . /etc/os-release 2>/dev/null || { echo "! no /etc/os-release" >&2; exit 1; }
+  FAMILY=
+  for id in $ID $ID_LIKE; do
+    case $id in
+      debian|ubuntu|linuxmint|neon|pop|raspbian) FAMILY=debian; break ;;
+      fedora|rhel|centos|rocky|almalinux|nobara)  FAMILY=fedora; break ;;
+      opensuse*|suse|sles)                         FAMILY=suse; break ;;
+      arch|manjaro|endeavouros|garuda|cachyos|kaos) FAMILY=arch; break ;;
+      alpine|postmarketos)                         FAMILY=alpine; break ;;
+      gentoo)                                      FAMILY=gentoo; break ;;
+      void)                                        FAMILY=void; break ;;
+    esac
+  done
+  [ -n "$FAMILY" ] || { echo "! Unsupported distro: $ID ($ID_LIKE)" >&2; exit 1; }
+  echo ":: Distro: $PRETTY_NAME (family: $FAMILY)"
+}
+
+# ---- the setup helper (Qt6 GUI in helper/) ----------------------------------
+helper_deps() {
+  case $FAMILY in
+    debian) $SUDO apt-get update
+            $SUDO apt-get -y install build-essential cmake ninja-build pkg-config qt6-base-dev ;;
+    fedora) $SUDO dnf -y install gcc-c++ make cmake ninja-build qt6-qtbase-devel ;;
+    suse)   $SUDO zypper --non-interactive in gcc-c++ make cmake ninja qt6-base-devel ;;
+    arch)   $SUDO pacman -Sy --noconfirm --needed base-devel cmake ninja qt6-base ;;
+    alpine) $SUDO apk add build-base cmake samurai qt6-qtbase-dev ;;
+    gentoo) $SUDO emerge --noreplace dev-build/cmake dev-build/ninja dev-qt/qtbase ;;
+    void)   $SUDO xbps-install -Sy base-devel cmake ninja qt6-base-devel ;;
+  esac
+}
+
+build_helper() { # build_helper [--no-launch]
+  [ -d "$HELPER_SRC" ] || { echo "! $HELPER_SRC not found" >&2; exit 1; }
+  detect_family
+  _have_qt=0
+  if command -v cmake >/dev/null 2>&1; then
+    if pkg-config --exists Qt6Widgets 2>/dev/null; then _have_qt=1; fi
+    for _d in /usr/lib/cmake /usr/lib64/cmake /usr/lib/x86_64-linux-gnu/cmake /usr/lib/aarch64-linux-gnu/cmake; do
+      [ -d "$_d/Qt6Widgets" ] && _have_qt=1
+    done
+  fi
+  if [ $_have_qt = 0 ]; then
+    echo ":: Installing what the helper needs (Qt6, CMake, a compiler) ..."
+    helper_deps
+  fi
+  _gen=Ninja
+  command -v ninja >/dev/null 2>&1 || command -v samu >/dev/null 2>&1 || _gen="Unix Makefiles"
+  cmake -S "$HELPER_SRC" -B "$HELPER_BUILD" -G "$_gen" -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$HELPER_BUILD" -j "$(nproc 2>/dev/null || echo 2)"
+  _bin=$HELPER_BUILD/claudeinstall-helper
+  echo ":: Helper built: $_bin"
+  if [ "$1" = --no-launch ]; then return 0; fi
+  if [ "$(id -u)" -eq 0 ]; then
+    echo ":: Running as root: start it as your normal user:  $_bin --dir \"$SRCDIR\""
+  elif [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
+    echo ":: Opening the helper. When you are done, run  ./build.sh build"
+    "$_bin" --dir "$SRCDIR" &
+  else
+    echo ":: No graphical session here. Start it from your desktop:  $_bin --dir \"$SRCDIR\""
+  fi
+}
+
+# ---- build.config (written by the helper; plain KEY=value lines, never executed) ----
+load_config() {
+  [ -f "$CONFIG" ] || return 1
+  while IFS= read -r _l || [ -n "$_l" ]; do
+    case $_l in ''|'#'*) continue ;; esac
+    _k=${_l%%=*}; _v=${_l#*=}
+    case $_k in
+      MODE) CFG_MODE=$_v ;;           INTERFACE) CFG_INTERFACE=$_v ;;
+      TEST) CFG_TEST=$_v ;;           DEPS) CFG_DEPS=$_v ;;
+      CLEAN) CFG_CLEAN=$_v ;;         INSTALL) CFG_INSTALL=$_v ;;
+      PACKAGE) CFG_PACKAGE=$_v ;;     JOBS) CFG_JOBS=$_v ;;
+      BUILDDIR) CFG_BUILDDIR=$_v ;;   CMAKE_ARGS) CFG_CMAKE_ARGS=$_v ;;
+      NEEDED_FILES) CFG_NEEDED_FILES=$_v ;;
+    esac
+  done < "$CONFIG"
+}
+
+# ---- command ----------------------------------------------------------------
+case ${1:-} in
+  ''|helper|run)                              CMD=helper ;;
+  build|deps|install|package|clean|config|help) CMD=$1 ;;
+  -h|--help)                                  CMD=help ;;
+  -*)                                         CMD=build ;;   # old style: ./build.sh --gui --install
+  *) echo "Unknown command: $1 (see ./build.sh help)" >&2; exit 1 ;;
+esac
+case ${1:-} in -*) ;; ?*) shift ;; esac
+
+CFG_LOADED=0
+load_config && CFG_LOADED=1 || true
+
+BUILDDIR=${BUILDDIR:-${CFG_BUILDDIR:-$SRCDIR/build}}
+case $BUILDDIR in /*) ;; *) BUILDDIR=$SRCDIR/$BUILDDIR ;; esac
+_j=${JOBS:-$CFG_JOBS}
+case $_j in ''|0|*[!0-9]*) _j=$(nproc 2>/dev/null || echo 2) ;; esac
+JOBS=$_j
+
+case $CMD in
+  help)   sed -n '2,/^# NOTE/p' "$0" | sed '$d'; exit 0 ;;
+  helper) build_helper "$@"; exit 0 ;;
+  clean)  rm -rf "$BUILDDIR" "$HELPER_BUILD"; echo ":: Removed $BUILDDIR and $HELPER_BUILD"; exit 0 ;;
+  config)
+    if [ "$CFG_LOADED" = 1 ]; then echo ":: $CONFIG"; cat "$CONFIG"
+    else echo "No $CONFIG yet. Run ./build.sh (no command) to build the helper and create one."; fi
+    exit 0 ;;
+esac
 
 DEPS=1 BUILD=1 TUI= GUI= QT6=ON INSTALL=0 PACKAGE=0 CLEAN=0 MODE=
+
+# settings from build.config (command-line options below override them)
+if [ "$CFG_LOADED" = 1 ]; then
+  echo ":: Using settings from $CONFIG"
+  case $CFG_MODE in new|clone|distro) MODE=$CFG_MODE ;; esac
+  case $CFG_INTERFACE in
+    gui) GUI=ON TUI=OFF ;; tui) GUI=OFF TUI=ON ;; both) GUI=ON TUI=ON ;;
+  esac
+  [ "$CFG_TEST" = 1 ]    && CMAKE_ARGS="$CMAKE_ARGS -DDEBUG_PARTITION_UNSAFE=ON"
+  [ "$CFG_DEPS" = 0 ]    && DEPS=0
+  [ "$CFG_CLEAN" = 1 ]   && CLEAN=1
+  [ "$CFG_INSTALL" = 1 ] && INSTALL=1
+  [ "$CFG_PACKAGE" = 1 ] && PACKAGE=1
+  [ -n "$CFG_CMAKE_ARGS" ] && CMAKE_ARGS="$CMAKE_ARGS $CFG_CMAKE_ARGS"
+  NEEDED_FILES=${NEEDED_FILES:-$CFG_NEEDED_FILES}
+fi
+case $CMD in
+  deps)    BUILD=0 DEPS=1 ;;
+  install) INSTALL=1 ;;
+  package) PACKAGE=1 ;;
+esac
+
 for a in "$@"; do
   case $a in
     --deps-only) BUILD=0 ;;
@@ -47,13 +198,10 @@ for a in "$@"; do
     --install)   INSTALL=1 ;;
     --package)   PACKAGE=1 ;;
     --clean)     CLEAN=1 ;;
-    -h|--help)   sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,/^# NOTE/p' "$0" | sed '$d'; exit 0 ;;
     *) echo "Unknown option: $a" >&2; exit 1 ;;
   esac
 done
-
-SUDO=
-[ "$(id -u)" -ne 0 ] && SUDO=sudo
 
 # ---- questions (skipped when the matching option was given) -----------------
 ask() { # ask VAR "question" "1) a" "2) b" ...
@@ -131,21 +279,7 @@ install_config() {
 }
 
 # ---- distro detection -------------------------------------------------------
-. /etc/os-release 2>/dev/null || { echo "! no /etc/os-release" >&2; exit 1; }
-FAMILY=
-for id in $ID $ID_LIKE; do
-  case $id in
-    debian|ubuntu|linuxmint|neon|pop|raspbian) FAMILY=debian; break ;;
-    fedora|rhel|centos|rocky|almalinux|nobara)  FAMILY=fedora; break ;;
-    opensuse*|suse|sles)                         FAMILY=suse; break ;;
-    arch|manjaro|endeavouros|garuda|cachyos|kaos) FAMILY=arch; break ;;
-    alpine|postmarketos)                         FAMILY=alpine; break ;;
-    gentoo)                                      FAMILY=gentoo; break ;;
-    void)                                        FAMILY=void; break ;;
-  esac
-done
-[ -n "$FAMILY" ] || { echo "! Unsupported distro: $ID ($ID_LIKE)" >&2; exit 1; }
-echo ":: Distro: $PRETTY_NAME (family: $FAMILY)"
+detect_family
 if [ "$MODE" = distro ] && [ "$FAMILY" != arch ]; then
   echo "! --claudemodsdistrosonline installs with pacstrap and must be built and run on an Arch-family system" >&2
   exit 1
