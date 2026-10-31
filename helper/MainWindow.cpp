@@ -3,6 +3,7 @@
 
 #include "MainWindow.h"
 
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QDir>
 #include <QFile>
@@ -187,9 +188,12 @@ MainWindow::createTypePage()
     layout->addWidget( heading( tr( "What is this installer for?" ),
                                 tr( "Pick the kind of installer to build. This decides which configuration is installed." ) ) );
 
+    // One exclusive group: choosing an installer type clears the others
+    auto* modeGroup = new QButtonGroup( page );
     for ( auto& b : m_modeButtons )
     {
         b = new QRadioButton;
+        modeGroup->addButton( b );
     }
     layout->addWidget( makeCard( m_modeButtons[ 0 ],
                                  tr( "New system setup" ),
@@ -225,9 +229,11 @@ MainWindow::createInterfacePage()
     auto* layout = new QVBoxLayout( page );
     layout->addWidget( heading( tr( "Which interface?" ), tr( "The graphical installer is always built with Qt6." ) ) );
 
+    auto* interfaceGroup = new QButtonGroup( page );
     for ( auto& b : m_interfaceButtons )
     {
         b = new QRadioButton;
+        interfaceGroup->addButton( b );
     }
     layout->addWidget( makeCard( m_interfaceButtons[ 0 ], tr( "GUI (Qt6)" ), tr( "Graphical installer for a desktop live session." ) ) );
     layout->addWidget( makeCard( m_interfaceButtons[ 1 ], tr( "TUI (terminal)" ), tr( "Text-mode installer for servers, TTYs and minimal live images." ) ) );
