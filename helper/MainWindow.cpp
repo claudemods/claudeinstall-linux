@@ -106,15 +106,24 @@ MainWindow::MainWindow( const QString& projectDir, QWidget* parent )
     , m_dir( projectDir )
 {
     setWindowTitle( tr( "ClaudeInstall Setup Helper" ) );
-    resize( 900, 620 );
+    setMinimumSize( 860, 600 );
+    resize( 960, 660 );
 
     auto* central = new QWidget;
     auto* root = new QVBoxLayout( central );
+    root->setContentsMargins( 16, 16, 16, 12 );
+    root->setSpacing( 12 );
     auto* body = new QHBoxLayout;
+    body->setSpacing( 20 );
 
     m_nav = new QListWidget;
-    m_nav->setFixedWidth( 200 );
-    m_nav->setSpacing( 2 );
+    m_nav->setFixedWidth( 210 );
+    m_nav->setSpacing( 3 );
+    m_nav->setFrameShape( QFrame::NoFrame );
+    m_nav->setStyleSheet( QStringLiteral(
+        "QListWidget { background: transparent; outline: 0; font-size: 11pt; }"
+        "QListWidget::item { padding: 10px 12px; border-radius: 6px; }"
+        "QListWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }" ) );
     m_nav->addItems( { tr( "1.  Installer type" ), tr( "2.  Interface" ), tr( "3.  Build options" ), tr( "4.  Review" ) } );
 
     m_pages = new QStackedWidget;
@@ -313,7 +322,7 @@ MainWindow::createReviewPage()
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout( page );
     layout->addWidget( heading( tr( "Review" ),
-                                tr( "This is what gets saved. Press “Save && Build” to save and compile, "
+                                tr( "This is what gets saved. Press “Save & Build” to save and compile, "
                                     "or run  ./build.sh build  yourself later." ) ) );
     m_review = new QPlainTextEdit;
     m_review->setReadOnly( true );
@@ -498,9 +507,18 @@ MainWindow::saveAndBuild()
         { "xterm", { "-e" } },
         { "x-terminal-emulator", { "-e" } },
     };
+    if ( !QFile::exists( QDir( m_dir ).filePath( QStringLiteral( "build.sh" ) ) ) )
+    {
+        QMessageBox::critical( this, tr( "build.sh not found" ), tr( "There is no build.sh in %1." ).arg( m_dir ) );
+        return;
+    }
+    // The folder is passed as an argument ($1), not through the terminal's working directory:
+    // some terminals (e.g. Konsole attaching to a running instance) ignore the latter.
     const QStringList script { QStringLiteral( "sh" ),
                                QStringLiteral( "-c" ),
-                               QStringLiteral( "./build.sh build; echo; printf 'Finished. Press Enter to close. '; read -r _" ) };
+                               QStringLiteral( "cd \"$1\" && ./build.sh build; echo; printf 'Finished. Press Enter to close. '; read -r _" ),
+                               QStringLiteral( "claudeinstall-build" ),
+                               m_dir };
 
     for ( const auto& t : terminals )
     {

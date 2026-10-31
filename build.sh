@@ -109,7 +109,7 @@ build_helper() { # build_helper [--no-launch]
     echo ":: Running as root: start it as your normal user:  $_bin --dir \"$SRCDIR\""
   elif [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
     echo ":: Opening the helper. When you are done, run  ./build.sh build"
-    "$_bin" --dir "$SRCDIR" &
+    ( cd "$SRCDIR" && "$_bin" --dir "$SRCDIR" >/dev/null 2>&1 & )
   else
     echo ":: No graphical session here. Start it from your desktop:  $_bin --dir \"$SRCDIR\""
   fi
