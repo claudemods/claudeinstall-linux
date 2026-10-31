@@ -94,15 +94,37 @@ private:
 
     /// Say what is going on: logged, and shown in the progress view
     void setStatus( const QString& status );
-    /// Runs a command, handing every line it prints to the status; returns its exit code and output
+    /// The status without the network speeds
+    QString statusText() const;
+    /// Reads the network counters (about once a second) and updates the download / upload speed shown with the status
+    void sampleNetwork();
+    void stopNetworkMeter();
+    /// Runs a command, handing every line it prints to the status; returns its exit code and output.
+    /// With @p stallSeconds, a command that in that time neither downloaded at least stallMinKiBps
+    /// on average nor printed anything but download progress is stopped (returns -2).
     int runStreaming( const QStringList& cmd, QString& output, int stallSeconds = 0 );
-    /// Tests the servers of every /etc/pacman.d/*mirrorlist and rewrites each one fastest first
-    /// (dead and slow servers are dropped), so pacman starts with the best server
+    /// Runs all of @p cmds at the same time and returns what each one printed on stdout
+    QStringList runParallel( const QList< QStringList >& cmds, int timeoutMs );
+    /// Pings the internet and checks DNS; waits up to two minutes for the connection to come back
+    ClaudeInstall::JobResult checkNetwork();
+    /// Tests the servers of every mirror list used by pacman.conf and rewrites each one fastest first:
+    /// a ping test of all servers (dead and broken links are dropped), then a real download speed test
+    /// of the closest ones. Arch's list also gets the up-to-date mirrors of archlinux.org/mirrors/status.
     void rankMirrors();
-    void rankMirrorFile( const QString& path, const QString& repo );
+    void rankMirrorFile( const QString& path, const QString& repo, const QStringList& official, const QSet< QString >& stale );
+    /// mirror list path -> the repository whose database is used to test its servers
+    QMap< QString, QString > mirrorRepos() const;
+    /// Fully synced https mirrors from archlinux.org (best first) and the mirrors it reports as out of date
+    void archMirrorsFromStatus( QStringList& good, QSet< QString >& stale );
 
     mutable QMutex m_statusMutex;
     QString m_status;
+    QString m_netRates;          ///< "↓ Download … ↑ Upload …" while a download runs
+    qint64 m_rxBytes = -1;
+    qint64 m_txBytes = -1;
+    qint64 m_netSampleMs = 0;
+    QSet< QString > m_badHosts;  ///< mirrors that failed or stalled during this installation
+    QStringList m_topHosts;      ///< the fastest server of each mirror list, as last ranked
     QElapsedTimer m_clock;
     qint64 m_lastEmitMs = -10000;
     double m_lastProgress = 0.0;
@@ -118,7 +140,10 @@ private:
     int m_retries = 5;
     bool m_rankMirrors = true;
     int m_mirrorKeep = 10;      ///< fastest servers kept per mirror list
-    int m_stallSeconds = 60;    ///< pacstrap printing nothing for this long is killed and retried (0 = never)
+    int m_speedTests = 6;       ///< closest servers per list whose download speed is measured
+    bool m_archMirrorStatus = true;
+    int m_stallSeconds = 300;   ///< watchdog window for pacstrap (0 = never stop it)
+    int m_stallMinKiBps = 20;   ///< slower than this over a whole window (and no other work) = stuck
     bool m_unresolvedIsFatal = true;
     QMap< QString, QString > m_renames;  ///< old name -> new name
     QSet< QString > m_removed;           ///< names that are gone for good and are dropped on purpose

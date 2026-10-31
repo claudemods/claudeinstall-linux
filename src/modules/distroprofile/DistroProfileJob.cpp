@@ -18,9 +18,13 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMutexLocker>
 #include <QProcess>
 #include <QRegularExpression>
@@ -37,6 +41,7 @@
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <vector>
 
 using ClaudeInstall::JobResult;
 using RunLocation = ClaudeInstall::System::RunLocation;
@@ -342,6 +347,64 @@ curlProgress( const QString& line )
         .arg( t.first(), humanSize( got ), humanSize( total ), rate, humanSize( total - got ), eta );
 }
 
+/// Bytes received and sent by every network interface except loopback, from /proc/net/dev
+bool
+readNetCounters( qint64& rx, qint64& tx )
+{
+    QFile f( QStringLiteral( "/proc/net/dev" ) );
+    if ( !f.open( QIODevice::ReadOnly | QIODevice::Text ) )
+    {
+        return false;
+    }
+    static const QRegularExpression space( QStringLiteral( "\\s+" ) );
+    rx = tx = 0;
+    const QStringList lines = QString::fromLatin1( f.readAll() ).split( QLatin1Char( '\n' ) );
+    for ( const QString& line : lines )
+    {
+        const int colon = line.indexOf( QLatin1Char( ':' ) );
+        if ( colon < 0 || line.left( colon ).trimmed() == QLatin1String( "lo" ) )
+        {
+            continue;
+        }
+        const QStringList v = line.mid( colon + 1 ).split( space, Qt::SkipEmptyParts );
+        if ( v.size() >= 9 )
+        {
+            rx += v.at( 0 ).toLongLong();
+            tx += v.at( 8 ).toLongLong();
+        }
+    }
+    return true;
+}
+
+/// "https://host/arch/$repo/os/$arch" -> "host/arch/": a mirror the same way the mirror status names it
+QString
+mirrorKey( const QString& server )
+{
+    QString s = server;
+    s.remove( QRegularExpression( QStringLiteral( "^[a-z]+://" ) ) );
+    const int repo = s.indexOf( QLatin1String( "$repo" ) );
+    if ( repo >= 0 )
+    {
+        s.truncate( repo );
+    }
+    return s.endsWith( QLatin1Char( '/' ) ) ? s : s + QLatin1Char( '/' );
+}
+
+/// Hosts that pacman says it could not download from ("failed retrieving file 'x' from host : ...")
+QStringList
+failedMirrors( const QString& output )
+{
+    static const QRegularExpression re( QStringLiteral( "failed retrieving file '[^']*' from (\\S+)" ) );
+    QStringList hosts;
+    auto it = re.globalMatch( output );
+    while ( it.hasNext() )
+    {
+        hosts << it.next().captured( 1 );
+    }
+    hosts.removeDuplicates();
+    return hosts;
+}
+
 /// "libfoo.so=1-64" -> "libfoo.so"
 QString
 withoutVersion( const QString& dependency )
@@ -401,7 +464,8 @@ QString
 DistroProfileJob::prettyStatusMessage() const
 {
     QMutexLocker lock( &m_statusMutex );
-    return m_status;
+    // While something downloads, the live download / upload speed is shown with the status
+    return m_netRates.isEmpty() ? m_status : m_status + QStringLiteral( "   |   " ) + m_netRates;
 }
 
 void
@@ -420,6 +484,55 @@ DistroProfileJob::setStatus( const QString& status )
     }
 }
 
+QString
+DistroProfileJob::statusText() const
+{
+    QMutexLocker lock( &m_statusMutex );
+    return m_status;
+}
+
+void
+DistroProfileJob::sampleNetwork()
+{
+    if ( !m_clock.isValid() )
+    {
+        return;
+    }
+    const qint64 now = m_clock.elapsed();
+    if ( m_rxBytes >= 0 && now - m_netSampleMs < 1000 )
+    {
+        return;
+    }
+    qint64 rx = 0, tx = 0;
+    if ( !readNetCounters( rx, tx ) )
+    {
+        return;
+    }
+    if ( m_rxBytes >= 0 && now > m_netSampleMs )
+    {
+        const double seconds = double( now - m_netSampleMs ) / 1000.0;
+        const QString rates = QStringLiteral( "↓ %1   ↑ %2" )
+                                  .arg( tr( "Download %1/s" ).arg( humanSize( double( qMax< qint64 >( 0, rx - m_rxBytes ) ) / seconds ) ),
+                                        tr( "Upload %1/s" ).arg( humanSize( double( qMax< qint64 >( 0, tx - m_txBytes ) ) / seconds ) ) );
+        {
+            QMutexLocker lock( &m_statusMutex );
+            m_netRates = rates;
+        }
+        emit progress( m_lastProgress );
+    }
+    m_rxBytes = rx;
+    m_txBytes = tx;
+    m_netSampleMs = now;
+}
+
+void
+DistroProfileJob::stopNetworkMeter()
+{
+    QMutexLocker lock( &m_statusMutex );
+    m_netRates.clear();
+    m_rxBytes = -1;
+}
+
 int
 DistroProfileJob::runStreaming( const QStringList& cmd, QString& output, int stallSeconds )
 {
@@ -432,7 +545,12 @@ DistroProfileJob::runStreaming( const QStringList& cmd, QString& output, int sta
         return -1;
     }
 
-    const QString prefix = prettyStatusMessage();
+    // Lines with a speed in them ("1.2 MiB/s") are download progress; anything else
+    // (installing, hooks) shows that the command is getting on with its work
+    static const QRegularExpression downloadLine( QStringLiteral( "[0-9.]+\\s*[KMGT]?i?B/s" ) );
+    bool worked = false;
+
+    const QString prefix = statusText();
     const bool isCurl = cmd.first() == QLatin1String( "curl" );
     QString pending;
     auto consume = [ & ]( const QByteArray& chunk )
@@ -449,35 +567,253 @@ DistroProfileJob::runStreaming( const QStringList& cmd, QString& output, int sta
             if ( !line.isEmpty() )
             {
                 setStatus( prefix + QStringLiteral( ": " ) + line.left( 130 ) );
+                if ( !downloadLine.match( raw ).hasMatch() && !raw.startsWith( QLatin1String( "error:" ) )
+                     && !raw.startsWith( QLatin1String( "warning:" ) ) )
+                {
+                    worked = true;
+                }
             }
         }
     };
-    QElapsedTimer quiet;
-    quiet.start();
+
+    // Watchdog: every stallSeconds the command must have downloaded at least m_stallMinKiBps
+    // on average, or done other work. If it did neither it is stuck on a dead or crawling server.
+    QElapsedTimer window;
+    window.start();
+    qint64 rxStart = 0, txStart = 0;
+    readNetCounters( rxStart, txStart );
     while ( !proc.waitForFinished( 300 ) )
     {
-        const QByteArray chunk = proc.readAll();
-        if ( !chunk.isEmpty() )
+        consume( proc.readAll() );
+        sampleNetwork();
+        if ( stallSeconds <= 0 || window.elapsed() < qint64( stallSeconds ) * 1000 )
         {
-            quiet.restart();
+            continue;
         }
-        else if ( stallSeconds > 0 && quiet.elapsed() > qint64( stallSeconds ) * 1000 )
+        qint64 rx = 0, tx = 0;
+        readNetCounters( rx, tx );
+        const qint64 received = rx - rxStart;
+        const qint64 needed = qint64( m_stallMinKiBps ) * 1024 * stallSeconds;
+        if ( worked || received >= needed )
         {
-            // Stuck on a dead or crawling server: stop it so the caller can try again at once
-            cWarning() << cmd.first() << "printed nothing for" << stallSeconds << "s; stopping it";
-            output += tr( "\nStalled for %1 s, stopped." ).arg( stallSeconds );
-            proc.terminate();
-            if ( !proc.waitForFinished( 5000 ) )
-            {
-                proc.kill();
-                proc.waitForFinished( 5000 );
-            }
-            return -2;
+            cDebug() << "Watchdog:" << cmd.first() << "is making progress, received" << humanSize( double( received ) ) << "in the last"
+                     << stallSeconds << "s";
+            worked = false;
+            rxStart = rx;
+            window.restart();
+            continue;
         }
-        consume( chunk );
+        cWarning() << "Watchdog:" << cmd.first() << "received only" << humanSize( double( received ) ) << "in" << stallSeconds
+                   << "s and did nothing else; stopping it";
+        output += tr( "\nNo download progress for %1 s (%2 received), stopped." ).arg( stallSeconds ).arg( humanSize( double( received ) ) );
+        proc.terminate();
+        if ( !proc.waitForFinished( 5000 ) )
+        {
+            proc.kill();
+            proc.waitForFinished( 5000 );
+        }
+        stopNetworkMeter();
+        return -2;
     }
     consume( proc.readAll() );
+    stopNetworkMeter();
     return proc.exitStatus() == QProcess::NormalExit ? proc.exitCode() : -1;
+}
+
+QStringList
+DistroProfileJob::runParallel( const QList< QStringList >& cmds, int timeoutMs )
+{
+    std::vector< std::unique_ptr< QProcess > > procs;
+    for ( const QStringList& cmd : cmds )
+    {
+        auto p = std::make_unique< QProcess >();
+        p->start( cmd.first(), cmd.mid( 1 ) );
+        procs.push_back( std::move( p ) );
+    }
+    QElapsedTimer t;
+    t.start();
+    for ( ;; )
+    {
+        bool done = true;
+        for ( auto& p : procs )
+        {
+            if ( p->state() != QProcess::NotRunning )
+            {
+                done = false;
+                p->waitForFinished( 50 );
+            }
+        }
+        sampleNetwork();
+        if ( done || t.elapsed() > timeoutMs )
+        {
+            break;
+        }
+    }
+    QStringList out;
+    for ( auto& p : procs )
+    {
+        if ( p->state() != QProcess::NotRunning )
+        {
+            p->kill();
+            p->waitForFinished( 1000 );
+        }
+        out << QString::fromUtf8( p->readAllStandardOutput() ).trimmed();
+    }
+    return out;
+}
+
+JobResult
+DistroProfileJob::checkNetwork()
+{
+    static const QRegularExpression rttRe( QStringLiteral( "= [0-9.]+/([0-9.]+)/" ) );
+    static const QRegularExpression lossRe( QStringLiteral( "([0-9.]+)% packet loss" ) );
+    QElapsedTimer waited;
+    waited.start();
+    for ( int round = 1;; ++round )
+    {
+        setStatus( tr( "Checking the internet connection (ping)", "@status" ) );
+        QString target;
+        double rtt = -1.0, loss = 100.0;
+        for ( const char* t : { "1.1.1.1", "8.8.8.8", "archlinux.org" } )
+        {
+            const auto r = host( { "ping", "-c", "4", "-i", "0.25", "-W", "2", t } );
+            const auto m = rttRe.match( r.getOutput() );
+            if ( m.hasMatch() )
+            {
+                target = QString::fromLatin1( t );
+                rtt = m.captured( 1 ).toDouble();
+                const auto l = lossRe.match( r.getOutput() );
+                loss = l.hasMatch() ? l.captured( 1 ).toDouble() : 0.0;
+                break;
+            }
+        }
+        const bool dns = host( { "getent", "hosts", "archlinux.org" } ).getExitCode() == 0;
+        // Some networks block ping: an https answer is just as good
+        const bool https = rtt < 0 && dns
+            && host( { "curl", "-sS", "-o", "/dev/null", "-I", "--connect-timeout", "5", "--max-time", "10", "https://archlinux.org/" } ).getExitCode() == 0;
+
+        if ( dns && ( rtt >= 0 || https ) )
+        {
+            const QString how = rtt >= 0 ? tr( "ping %1 ms to %2, %3% packet loss" ).arg( QString::number( rtt, 'f', 0 ), target, QString::number( loss ) )
+                                         : tr( "ping is blocked, https works" );
+            setStatus( tr( "Internet connection OK: %1", "@status" ).arg( how ) );
+            cDebug() << "Network check:" << how;
+            if ( loss >= 25.0 )
+            {
+                cWarning() << "Heavy packet loss (" << loss << "%): downloads may be slow";
+            }
+            return JobResult::ok();
+        }
+
+        const QString why = dns ? tr( "no server answers" ) : tr( "names cannot be looked up (DNS)" );
+        if ( waited.elapsed() > 120000 )
+        {
+            return JobResult::error( tr( "No internet connection" ),
+                                     tr( "The packages are downloaded during the installation, but %1 since two minutes.\n"
+                                         "Check the cable or Wi-Fi connection and start the installation again." )
+                                         .arg( why ) );
+        }
+        cWarning() << "Network check" << round << "failed:" << why;
+        setStatus( tr( "No internet connection (%1); checking again in 5 s", "@status" ).arg( why ) );
+        QThread::sleep( 5 );
+    }
+}
+
+QMap< QString, QString >
+DistroProfileJob::mirrorRepos() const
+{
+    // [repo] sections of pacman.conf whose "Include =" names a mirror list
+    QFile f( QStringLiteral( "/etc/pacman.conf" ) );
+    if ( !f.open( QIODevice::ReadOnly | QIODevice::Text ) )
+    {
+        return {};
+    }
+    static const QRegularExpression sectionRe( QStringLiteral( "^\\s*\\[([^\\]]+)\\]" ) );
+    static const QRegularExpression includeRe( QStringLiteral( "^\\s*Include\\s*=\\s*(\\S+)" ) );
+    QMap< QString, QStringList > byFile;
+    QString section;
+    while ( !f.atEnd() )
+    {
+        const QString line = QString::fromUtf8( f.readLine() );
+        const auto s = sectionRe.match( line );
+        if ( s.hasMatch() )
+        {
+            section = s.captured( 1 ).trimmed();
+            continue;
+        }
+        const auto i = includeRe.match( line );
+        if ( i.hasMatch() && !section.isEmpty() && section != QLatin1String( "options" ) )
+        {
+            byFile[ QDir::cleanPath( i.captured( 1 ) ) ] << section;
+        }
+    }
+    // The biggest database makes the best speed test: prefer an "extra" repository
+    QMap< QString, QString > out;
+    for ( auto it = byFile.constBegin(); it != byFile.constEnd(); ++it )
+    {
+        QString repo = it.value().first();
+        for ( const QString& r : it.value() )
+        {
+            if ( r.contains( QLatin1String( "extra" ) ) )
+            {
+                repo = r;
+                break;
+            }
+        }
+        out.insert( it.key(), repo );
+    }
+    return out;
+}
+
+void
+DistroProfileJob::archMirrorsFromStatus( QStringList& good, QSet< QString >& stale )
+{
+    // archlinux.org checks every mirror all the time: only mirrors that are fully synced and
+    // less than an hour behind are used, the ones it reports as behind are dropped
+    setStatus( tr( "Getting the up-to-date mirrors from archlinux.org/mirrors/status", "@status" ) );
+    const QString json = runParallel( { { "curl", "-fsSL", "--connect-timeout", "10", "--max-time", "30",
+                                          "https://archlinux.org/mirrors/status/json/" } },
+                                      35000 )
+                             .value( 0 );
+    const QJsonArray urls = QJsonDocument::fromJson( json.toUtf8() ).object().value( QStringLiteral( "urls" ) ).toArray();
+    if ( urls.isEmpty() )
+    {
+        cWarning() << "The Arch Linux mirror status could not be read; testing the servers already in the list";
+        return;
+    }
+    QVector< QPair< double, QString > > scored;
+    QSet< QString > freshKeys, staleKeys;
+    for ( const QJsonValue& v : urls )
+    {
+        const QJsonObject o = v.toObject();
+        const QString url = o.value( QStringLiteral( "url" ) ).toString();
+        if ( url.isEmpty() )
+        {
+            continue;
+        }
+        const QJsonValue delay = o.value( QStringLiteral( "delay" ) );
+        const QJsonValue score = o.value( QStringLiteral( "score" ) );
+        const bool fresh = o.value( QStringLiteral( "active" ) ).toBool( true )
+            && o.value( QStringLiteral( "completion_pct" ) ).toDouble() >= 0.99 && delay.isDouble() && delay.toDouble() <= 3600.0
+            && score.isDouble();
+        if ( !fresh )
+        {
+            staleKeys.insert( mirrorKey( url ) );
+            continue;
+        }
+        freshKeys.insert( mirrorKey( url ) );
+        if ( o.value( QStringLiteral( "protocol" ) ).toString() == QLatin1String( "https" ) )
+        {
+            scored.append( { score.toDouble(), url } );
+        }
+    }
+    std::sort( scored.begin(), scored.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+    for ( const auto& s : std::as_const( scored ) )
+    {
+        good << s.second + ( s.second.endsWith( '/' ) ? QString() : QStringLiteral( "/" ) ) + QStringLiteral( "$repo/os/$arch" );
+    }
+    stale = staleKeys - freshKeys;
+    cDebug() << "Mirror status:" << good.size() << "up-to-date https mirrors," << stale.size() << "out of date";
 }
 
 void
@@ -490,18 +826,37 @@ DistroProfileJob::rankMirrors()
     // "Never time out" is what leaves a download hanging on a dead server
     host( { "sed", "-i", "/^[[:space:]]*DisableDownloadTimeout/d", "/etc/pacman.conf" } );
 
+    m_topHosts.clear();
+    const QMap< QString, QString > repos = mirrorRepos();
     const QDir dir( QStringLiteral( "/etc/pacman.d" ) );
     const QStringList lists = dir.entryList( { QStringLiteral( "*mirrorlist" ) }, QDir::Files );
     for ( const QString& name : lists )
     {
-        const QString repo = name == QLatin1String( "mirrorlist" ) ? QStringLiteral( "core" )
-                                                                    : name.chopped( int( QStringLiteral( "-mirrorlist" ).size() ) );
-        rankMirrorFile( dir.filePath( name ), repo );
+        const QString path = QDir::cleanPath( dir.filePath( name ) );
+        if ( !repos.isEmpty() && !repos.contains( path ) )
+        {
+            cDebug() << path << "is not used by pacman.conf; not tested";
+            continue;
+        }
+        QString repo = repos.value( path );
+        if ( repo.isEmpty() )
+        {
+            repo = name == QLatin1String( "mirrorlist" ) ? QStringLiteral( "extra" )
+                                                         : name.chopped( int( QStringLiteral( "-mirrorlist" ).size() ) );
+        }
+        QStringList official;
+        QSet< QString > stale;
+        if ( name == QLatin1String( "mirrorlist" ) && m_archMirrorStatus )
+        {
+            archMirrorsFromStatus( official, stale );
+        }
+        rankMirrorFile( path, repo, official.mid( 0, 40 ), stale );
     }
+    stopNetworkMeter();
 }
 
 void
-DistroProfileJob::rankMirrorFile( const QString& path, const QString& repo )
+DistroProfileJob::rankMirrorFile( const QString& path, const QString& repo, const QStringList& official, const QSet< QString >& stale )
 {
     QFile in( path );
     if ( !in.open( QIODevice::ReadOnly | QIODevice::Text ) )
@@ -510,56 +865,151 @@ DistroProfileJob::rankMirrorFile( const QString& path, const QString& repo )
     }
     static const QRegularExpression serverRe( QStringLiteral( "^\\s*Server\\s*=\\s*(\\S+)" ) );
     QStringList servers;
+    int dropped = 0;
     while ( !in.atEnd() )
     {
         const auto m = serverRe.match( QString::fromUtf8( in.readLine() ) );
-        if ( m.hasMatch() && !servers.contains( m.captured( 1 ) ) )
+        if ( !m.hasMatch() || servers.contains( m.captured( 1 ) ) )
         {
-            servers << m.captured( 1 );
+            continue;
         }
+        if ( stale.contains( mirrorKey( m.captured( 1 ) ) ) )
+        {
+            ++dropped;  // the mirror status says it is behind: it would hand out old or missing files
+            continue;
+        }
+        servers << m.captured( 1 );
     }
     in.close();
+    // The list's own servers first (they are usually the local ones), then the best official ones
+    for ( const QString& s : official )
+    {
+        if ( !servers.contains( s ) )
+        {
+            servers << s;
+        }
+    }
+    // Servers that already failed this installation go only if something else is left
+    QStringList usable;
+    for ( const QString& s : std::as_const( servers ) )
+    {
+        if ( !m_badHosts.contains( QUrl( s ).host() ) )
+        {
+            usable << s;
+        }
+    }
+    if ( !usable.isEmpty() )
+    {
+        servers = usable;
+    }
+    servers = servers.mid( 0, 80 );
     if ( servers.size() < 2 )
     {
         return;
     }
-    servers = servers.mid( 0, 60 );
-    setStatus( tr( "Finding the fastest of %1 servers in %2", "@status" ).arg( servers.size() ).arg( QFileInfo( path ).fileName() ) );
-
-    // Time the download of the repository database from every server, 8 at a time
-    QVector< QPair< double, QString > > timed;
-    for ( int first = 0; first < servers.size(); first += 8 )
+    const QString file = QFileInfo( path ).fileName();
+    auto databaseUrl = [ & ]( const QString& server )
     {
-        QVector< QProcess* > running;
-        const QStringList batch = servers.mid( first, 8 );
+        QString url = server;
+        url.replace( QLatin1String( "$repo" ), repo ).replace( QLatin1String( "$arch" ), QStringLiteral( "x86_64" ) );
+        return url + '/' + repo + QStringLiteral( ".db" );
+    };
+    struct Result
+    {
+        QString server;
+        double pingMs = -1.0;
+        double speed = -1.0;  ///< bytes per second, -1 when not tested
+    };
+
+    // 1. Ping: the TCP connect time of every server, 16 at a time. A server must answer with
+    //    the repository database itself (HTTP 200/206), so dead and broken links are dropped.
+    QVector< Result > alive;
+    for ( int first = 0; first < servers.size(); first += 16 )
+    {
+        const QStringList batch = servers.mid( first, 16 );
+        setStatus( tr( "%1: ping test of servers %2-%3 of %4", "@status" )
+                       .arg( file )
+                       .arg( first + 1 )
+                       .arg( first + batch.size() )
+                       .arg( servers.size() ) );
+        QList< QStringList > cmds;
         for ( const QString& s : batch )
         {
-            QString url = s;
-            url.replace( QLatin1String( "$repo" ), repo ).replace( QLatin1String( "$arch" ), QStringLiteral( "x86_64" ) );
-            auto* p = new QProcess;
-            p->start( QStringLiteral( "curl" ),
-                      { "-s", "-L", "-o", "/dev/null", "--connect-timeout", "3", "--max-time", "6", "-w", "%{http_code} %{time_total}",
-                        url + '/' + repo + QStringLiteral( ".db" ) } );
-            running << p;
+            cmds << QStringList { "curl", "-s", "-L", "--head", "-o", "/dev/null", "--connect-timeout", "3", "--max-time", "6",
+                                  "-w", "%{http_code} %{exitcode} %{time_namelookup} %{time_connect}", databaseUrl( s ) };
         }
-        for ( int i = 0; i < running.size(); ++i )
+        const QStringList outs = runParallel( cmds, 9000 );
+        for ( int i = 0; i < batch.size(); ++i )
         {
-            running.at( i )->waitForFinished( 9000 );
-            const QStringList out = QString::fromUtf8( running.at( i )->readAllStandardOutput() ).trimmed().split( ' ' );
-            if ( running.at( i )->exitCode() == 0 && out.size() == 2 && out.at( 0 ) == QLatin1String( "200" ) )
+            const QStringList f = outs.value( i ).split( ' ' );
+            if ( f.size() != 4 || ( f.at( 0 ) != QLatin1String( "200" ) && f.at( 0 ) != QLatin1String( "206" ) )
+                 || f.at( 1 ) != QLatin1String( "0" ) )
             {
-                timed.append( { out.at( 1 ).toDouble(), batch.at( i ) } );
+                continue;
             }
-            running.at( i )->kill();
-            delete running.at( i );
+            const double connect = f.at( 3 ).toDouble(), lookup = f.at( 2 ).toDouble();
+            alive.append( { batch.at( i ), ( connect > lookup ? connect - lookup : connect ) * 1000.0 } );
         }
     }
-    if ( timed.isEmpty() )
+    if ( alive.isEmpty() )
     {
-        cWarning() << "No server in" << path << "answered; leaving it as it is";
+        cWarning() << "No server in" << path << "answered the ping test; leaving it as it is";
         return;
     }
-    std::sort( timed.begin(), timed.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+    std::sort( alive.begin(), alive.end(), []( const Result& a, const Result& b ) { return a.pingMs < b.pingMs; } );
+
+    // 2. Speed: download the database for up to 5 s from the closest servers, one at a time so
+    //    they do not share the line. What counts is the real download rate.
+    const int tests = qMin( m_speedTests, int( alive.size() ) );
+    QVector< Result > ranked, broken;
+    for ( int i = 0; i < alive.size(); ++i )
+    {
+        Result r = alive.at( i );
+        if ( i >= tests )
+        {
+            ranked.append( r );
+            continue;
+        }
+        const QString hostName = QUrl( r.server ).host();
+        setStatus( tr( "%1: speed test %2 of %3, %4 (ping %5 ms)", "@status" )
+                       .arg( file )
+                       .arg( i + 1 )
+                       .arg( tests )
+                       .arg( hostName, QString::number( r.pingMs, 'f', 0 ) ) );
+        const QStringList f = runParallel( { { "curl", "-s", "-L", "-o", "/dev/null", "--connect-timeout", "3", "--max-time", "5", "-w",
+                                               "%{http_code} %{exitcode} %{speed_download} %{size_download}", databaseUrl( r.server ) } },
+                                           8000 )
+                                  .value( 0 )
+                                  .split( ' ' );
+        const bool ok = f.size() == 4 && f.at( 0 ) == QLatin1String( "200" )
+            && ( f.at( 1 ) == QLatin1String( "0" ) || f.at( 1 ) == QLatin1String( "28" ) ) && f.at( 3 ).toDouble() >= 1024.0;
+        if ( !ok )
+        {
+            cWarning() << "Speed test of" << r.server << "failed:" << f.join( ' ' );
+            broken.append( r );
+            continue;
+        }
+        r.speed = f.at( 2 ).toDouble();
+        cDebug() << "Mirror" << hostName << "ping" << r.pingMs << "ms," << humanSize( r.speed ) << "/s";
+        setStatus( tr( "%1: %2 - ping %3 ms, %4/s", "@status" )
+                       .arg( file, hostName, QString::number( r.pingMs, 'f', 0 ), humanSize( r.speed ) ) );
+        ranked.append( r );
+    }
+    // Measured servers by speed, then the untested ones by ping (failed speed tests are left out)
+    std::stable_sort( ranked.begin(),
+                      ranked.end(),
+                      []( const Result& a, const Result& b )
+                      {
+                          if ( ( a.speed >= 0 ) != ( b.speed >= 0 ) )
+                          {
+                              return a.speed >= 0;
+                          }
+                          return a.speed >= 0 ? a.speed > b.speed : a.pingMs < b.pingMs;
+                      } );
+    if ( ranked.isEmpty() )
+    {
+        ranked = broken;  // better than nothing
+    }
 
     if ( !QFileInfo::exists( path + QStringLiteral( ".claudeinstall-orig" ) ) )
     {
@@ -571,12 +1021,24 @@ DistroProfileJob::rankMirrorFile( const QString& path, const QString& repo )
         return;
     }
     QTextStream ts( &out );
-    ts << "# Ranked by ClaudeInstall: fastest first\n";
-    for ( int i = 0; i < timed.size() && i < m_mirrorKeep; ++i )
+    ts << "# Ranked by ClaudeInstall on " << QDateTime::currentDateTimeUtc().toString( Qt::ISODate ) << '\n'
+       << "# Ping test of " << servers.size() << " servers (" << alive.size() << " answered with the " << repo
+       << " database), speed test of the " << tests << " closest; fastest first.\n";
+    if ( dropped > 0 )
     {
-        ts << "Server = " << timed.at( i ).second << '\n';
+        ts << "# " << dropped << " servers dropped: out of date according to archlinux.org/mirrors/status\n";
     }
-    cDebug() << "Fastest server for" << repo << ":" << timed.first().second << "in" << timed.first().first << "s";
+    for ( int i = 0; i < ranked.size() && i < m_mirrorKeep; ++i )
+    {
+        const Result& r = ranked.at( i );
+        ts << "# ping " << QString::number( r.pingMs, 'f', 0 ) << " ms"
+           << ( r.speed >= 0 ? QStringLiteral( ", %1/s" ).arg( humanSize( r.speed ) ) : QString() ) << '\n'
+           << "Server = " << r.server << '\n';
+    }
+    const Result& best = ranked.first();
+    m_topHosts << QUrl( best.server ).host();
+    cDebug() << "Fastest server for" << repo << ":" << best.server << "ping" << best.pingMs << "ms,"
+             << ( best.speed >= 0 ? humanSize( best.speed ) + QStringLiteral( "/s" ) : QStringLiteral( "speed not measured" ) );
 }
 
 QString
@@ -911,6 +1373,13 @@ DistroProfileJob::resolvePackages( QStringList& packages )
 JobResult
 DistroProfileJob::bootstrap( const QString& root, QStringList packages )
 {
+    {
+        auto online = checkNetwork();
+        if ( !online )
+        {
+            return online;
+        }
+    }
     rankMirrors();
     refreshHostPackageLists();
     loadRenameTable();
@@ -962,8 +1431,27 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
             return JobResult::error( tr( "Setup step failed" ),
                                      tr( "The command <pre>%1</pre> returned error code %2." ).arg( cmd.join( ' ' ) ).arg( code ) );
         }
-        setStatus( tr( "pacstrap failed or stalled; choosing the fastest server again and retrying", "@status" ) );
-        cWarning() << "pacstrap failed or stalled; choosing the fastest server again and retrying";
+        // Servers that failed (or the ones in use when the download stalled) are not picked again
+        QStringList bad = failedMirrors( out );
+        if ( code == -2 )
+        {
+            bad += m_topHosts;
+        }
+        for ( const QString& h : std::as_const( bad ) )
+        {
+            m_badHosts.insert( h );
+        }
+        const QString why = code == -2 ? tr( "no download progress for %1 min" ).arg( qMax( 1, m_stallSeconds / 60 ) )
+                                       : tr( "pacstrap failed (error %1)" ).arg( code );
+        setStatus( tr( "%1; testing the mirrors again and retrying with the fastest working one", "@status" ).arg( why ) );
+        cWarning() << why << "- servers not used again:" << bad;
+        {
+            auto online = checkNetwork();
+            if ( !online )
+            {
+                return online;
+            }
+        }
         rankMirrors();
         refreshHostPackageLists();
         QThread::sleep( 1 );
@@ -1434,7 +1922,10 @@ DistroProfileJob::setConfigurationMap( const QVariantMap& configurationMap )
     m_retries = ClaudeInstall::getInteger( configurationMap, "retries", 5 );
     m_rankMirrors = ClaudeInstall::getBool( configurationMap, "rankMirrors", true );
     m_mirrorKeep = qMax( 1, int( ClaudeInstall::getInteger( configurationMap, "mirrorKeep", 10 ) ) );
-    m_stallSeconds = int( ClaudeInstall::getInteger( configurationMap, "stallSeconds", 60 ) );
+    m_speedTests = qMax( 1, int( ClaudeInstall::getInteger( configurationMap, "mirrorSpeedTests", 6 ) ) );
+    m_archMirrorStatus = ClaudeInstall::getBool( configurationMap, "archMirrorStatus", true );
+    m_stallSeconds = int( ClaudeInstall::getInteger( configurationMap, "stallSeconds", 300 ) );
+    m_stallMinKiBps = qMax( 0, int( ClaudeInstall::getInteger( configurationMap, "stallMinKiBps", 20 ) ) );
     m_unresolvedIsFatal = ClaudeInstall::getString( configurationMap, "unresolvedPackages", QStringLiteral( "fail" ) ) != QLatin1String( "warn" );
 }
 
