@@ -11,6 +11,7 @@
 #include "GlobalStorage.h"
 #include "JobQueue.h"
 #include "utils/Logger.h"
+#include "utils/String.h"
 #include "utils/System.h"
 #include "utils/Variant.h"
 #include "utils/Yaml.h"
@@ -57,6 +58,104 @@ ClaudeInstall::ProcessResult
 inTarget( const QStringList& args )
 {
     return ClaudeInstall::System::runCommand( RunLocation::RunInTarget, args );
+}
+
+/// Runs @p args in the target through chroot(8) without writing the command, its input or its
+/// output to the log (used for the final account reset, whose input is the password).
+int
+quietInTarget( const QString& root, const QStringList& args, const QString& stdInput = QString(), QString* output = nullptr )
+{
+    QProcess process;
+    process.setProgram( QStringLiteral( "chroot" ) );
+    process.setArguments( QStringList { root } + args );
+    process.setProcessChannelMode( QProcess::MergedChannels );
+    process.start();
+    if ( !process.waitForStarted() )
+    {
+        return -1;
+    }
+    if ( !stdInput.isEmpty() )
+    {
+        process.write( stdInput.toUtf8() );
+    }
+    process.closeWriteChannel();
+    if ( !process.waitForFinished( 60000 ) )
+    {
+        process.kill();
+        return -1;
+    }
+    if ( output )
+    {
+        *output = QString::fromUtf8( process.readAllStandardOutput() );
+    }
+    return process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
+}
+
+/// Last step before unmounting: delete the user inside the new system, create it again and
+/// set the password with chpasswd (password on stdin, nothing logged).
+JobResult
+resetUserAccount( const QString& root, const QString& user, const QString& password )
+{
+    const auto bad = []( const QString& what ) {
+        return JobResult::error( QCoreApplication::translate( "DistroProfileJob", "Cannot reset the user account" ), what );
+    };
+
+    // Remember what the users module set up, so the new account matches it
+    QString passwd;
+    if ( quietInTarget( root, { "getent", "passwd", user }, QString(), &passwd ) != 0 )
+    {
+        return bad( QCoreApplication::translate( "DistroProfileJob", "The user does not exist in the new system." ) );
+    }
+    const QStringList f = passwd.trimmed().split( ':' );
+    if ( f.size() < 7 )
+    {
+        return bad( QCoreApplication::translate( "DistroProfileJob", "Unreadable account entry." ) );
+    }
+    const QString uid = f.at( 2 ), comment = f.at( 4 ), home = f.at( 5 ), shell = f.at( 6 );
+
+    QString groupList;
+    quietInTarget( root, { "id", "-nG", user }, QString(), &groupList );
+    const QStringList oldGroups = groupList.trimmed().split( ' ', Qt::SkipEmptyParts );
+
+    if ( quietInTarget( root, { "userdel", user } ) != 0 )
+    {
+        return bad( QCoreApplication::translate( "DistroProfileJob", "userdel failed." ) );
+    }
+
+    // The user's own group went with the user; the others still exist
+    QStringList groups;
+    for ( const QString& g : oldGroups )
+    {
+        if ( g != user && quietInTarget( root, { "getent", "group", g } ) == 0 )
+        {
+            groups << g;
+        }
+    }
+
+    QStringList add { "useradd", "-M", "-u", uid, "-d", home, "-s", shell, "-c", comment };
+    if ( !groups.isEmpty() )
+    {
+        add << "-G" << groups.join( ',' );
+    }
+    add << user;
+    if ( quietInTarget( root, add ) != 0 )
+    {
+        return bad( QCoreApplication::translate( "DistroProfileJob", "useradd failed." ) );
+    }
+
+    if ( quietInTarget( root, { "chpasswd" }, user + QLatin1Char( ':' ) + password + QLatin1Char( '\n' ) ) != 0 )
+    {
+        return bad( QCoreApplication::translate( "DistroProfileJob", "chpasswd failed." ) );
+    }
+
+    // The home directory survived userdel; give it to the new account (its group id may differ)
+    QString gid;
+    quietInTarget( root, { "id", "-g", user }, QString(), &gid );
+    if ( !gid.trimmed().isEmpty() )
+    {
+        quietInTarget( root, { "chown", "-R", uid + QLatin1Char( ':' ) + gid.trimmed(), home } );
+    }
+    return JobResult::ok();
 }
 
 JobResult
@@ -210,6 +309,10 @@ DistroProfileJob::~DistroProfileJob() {}
 QString
 DistroProfileJob::prettyName() const
 {
+    if ( m_phase == QLatin1String( "finalize" ) )
+    {
+        return tr( "Finish the user account", "@status" );
+    }
     return m_phase == QLatin1String( "customize" ) ? tr( "Apply the distribution's customisation", "@status" )
                                                    : tr( "Install the distribution", "@status" );
 }
@@ -1057,6 +1160,16 @@ DistroProfileJob::exec()
     if ( ctx.root.isEmpty() || !QFileInfo::exists( ctx.root ) )
     {
         return JobResult::error( tr( "No target" ), tr( "globalstorage has no usable \"rootMountPoint\"." ) );
+    }
+
+    if ( m_phase == QLatin1String( "finalize" ) )
+    {
+        const QString encoded = gs->value( "password" ).toString();
+        if ( ctx.user.isEmpty() || encoded.isEmpty() )
+        {
+            return JobResult::error( tr( "No user" ), tr( "The final account reset needs the user and password from the users module." ) );
+        }
+        return resetUserAccount( ctx.root, ctx.user, ClaudeInstall::String::obscure( encoded ) );
     }
     auto fetched = ensureAssets( ctx.assets );
     if ( !fetched )

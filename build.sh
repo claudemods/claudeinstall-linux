@@ -242,6 +242,7 @@ install_config() {
     $SUDO install -Dm644 "$SRCDIR/packagechooser-distro.conf" "$_d/modules/packagechooser-distro.conf"
     $SUDO install -Dm644 "$SRCDIR/src/modules/distroprofile/distroprofile.conf" "$_d/modules/distroprofile.conf"
     $SUDO install -Dm644 "$SRCDIR/src/modules/distroprofile/distroprofile-customize.conf" "$_d/modules/distroprofile-customize.conf"
+    $SUDO install -Dm644 "$SRCDIR/src/modules/distroprofile/distroprofile-finalize.conf" "$_d/modules/distroprofile-finalize.conf"
     for _p in "$SRCDIR"/profiles/*.conf; do
       $SUDO install -Dm644 "$_p" "$1/usr/share/claudeinstall/profiles/$(basename "$_p")"
     done
