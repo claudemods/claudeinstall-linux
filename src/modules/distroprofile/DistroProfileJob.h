@@ -95,7 +95,11 @@ private:
     /// Say what is going on: logged, and shown in the progress view
     void setStatus( const QString& status );
     /// Runs a command, handing every line it prints to the status; returns its exit code and output
-    int runStreaming( const QStringList& cmd, QString& output );
+    int runStreaming( const QStringList& cmd, QString& output, int stallSeconds = 0 );
+    /// Tests the servers of every /etc/pacman.d/*mirrorlist and rewrites each one fastest first
+    /// (dead and slow servers are dropped), so pacman starts with the best server
+    void rankMirrors();
+    void rankMirrorFile( const QString& path, const QString& repo );
 
     mutable QMutex m_statusMutex;
     QString m_status;
@@ -111,7 +115,10 @@ private:
     QString m_profileKey;
     QString m_phase;
     QString m_regdom;
-    int m_retries = 3;
+    int m_retries = 5;
+    bool m_rankMirrors = true;
+    int m_mirrorKeep = 10;      ///< fastest servers kept per mirror list
+    int m_stallSeconds = 60;    ///< pacstrap printing nothing for this long is killed and retried (0 = never)
     bool m_unresolvedIsFatal = true;
     QMap< QString, QString > m_renames;  ///< old name -> new name
     QSet< QString > m_removed;           ///< names that are gone for good and are dropped on purpose

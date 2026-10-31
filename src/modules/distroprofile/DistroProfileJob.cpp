@@ -341,7 +341,7 @@ DistroProfileJob::setStatus( const QString& status )
 }
 
 int
-DistroProfileJob::runStreaming( const QStringList& cmd, QString& output )
+DistroProfileJob::runStreaming( const QStringList& cmd, QString& output, int stallSeconds )
 {
     QProcess proc;
     proc.setProcessChannelMode( QProcess::MergedChannels );
@@ -372,12 +372,131 @@ DistroProfileJob::runStreaming( const QStringList& cmd, QString& output )
             }
         }
     };
+    QElapsedTimer quiet;
+    quiet.start();
     while ( !proc.waitForFinished( 300 ) )
     {
-        consume( proc.readAll() );
+        const QByteArray chunk = proc.readAll();
+        if ( !chunk.isEmpty() )
+        {
+            quiet.restart();
+        }
+        else if ( stallSeconds > 0 && quiet.elapsed() > qint64( stallSeconds ) * 1000 )
+        {
+            // Stuck on a dead or crawling server: stop it so the caller can try again at once
+            cWarning() << cmd.first() << "printed nothing for" << stallSeconds << "s; stopping it";
+            output += tr( "\nStalled for %1 s, stopped." ).arg( stallSeconds );
+            proc.terminate();
+            if ( !proc.waitForFinished( 5000 ) )
+            {
+                proc.kill();
+                proc.waitForFinished( 5000 );
+            }
+            return -2;
+        }
+        consume( chunk );
     }
     consume( proc.readAll() );
     return proc.exitStatus() == QProcess::NormalExit ? proc.exitCode() : -1;
+}
+
+void
+DistroProfileJob::rankMirrors()
+{
+    if ( !m_rankMirrors )
+    {
+        return;
+    }
+    // "Never time out" is what leaves a download hanging on a dead server
+    host( { "sed", "-i", "/^[[:space:]]*DisableDownloadTimeout/d", "/etc/pacman.conf" } );
+
+    const QDir dir( QStringLiteral( "/etc/pacman.d" ) );
+    const QStringList lists = dir.entryList( { QStringLiteral( "*mirrorlist" ) }, QDir::Files );
+    for ( const QString& name : lists )
+    {
+        const QString repo = name == QLatin1String( "mirrorlist" ) ? QStringLiteral( "core" )
+                                                                    : name.chopped( int( QStringLiteral( "-mirrorlist" ).size() ) );
+        rankMirrorFile( dir.filePath( name ), repo );
+    }
+}
+
+void
+DistroProfileJob::rankMirrorFile( const QString& path, const QString& repo )
+{
+    QFile in( path );
+    if ( !in.open( QIODevice::ReadOnly | QIODevice::Text ) )
+    {
+        return;
+    }
+    static const QRegularExpression serverRe( QStringLiteral( "^\\s*Server\\s*=\\s*(\\S+)" ) );
+    QStringList servers;
+    while ( !in.atEnd() )
+    {
+        const auto m = serverRe.match( QString::fromUtf8( in.readLine() ) );
+        if ( m.hasMatch() && !servers.contains( m.captured( 1 ) ) )
+        {
+            servers << m.captured( 1 );
+        }
+    }
+    in.close();
+    if ( servers.size() < 2 )
+    {
+        return;
+    }
+    servers = servers.mid( 0, 60 );
+    setStatus( tr( "Finding the fastest of %1 servers in %2", "@status" ).arg( servers.size() ).arg( QFileInfo( path ).fileName() ) );
+
+    // Time the download of the repository database from every server, 8 at a time
+    QVector< QPair< double, QString > > timed;
+    for ( int first = 0; first < servers.size(); first += 8 )
+    {
+        QVector< QProcess* > running;
+        const QStringList batch = servers.mid( first, 8 );
+        for ( const QString& s : batch )
+        {
+            QString url = s;
+            url.replace( QLatin1String( "$repo" ), repo ).replace( QLatin1String( "$arch" ), QStringLiteral( "x86_64" ) );
+            auto* p = new QProcess;
+            p->start( QStringLiteral( "curl" ),
+                      { "-s", "-L", "-o", "/dev/null", "--connect-timeout", "3", "--max-time", "6", "-w", "%{http_code} %{time_total}",
+                        url + '/' + repo + QStringLiteral( ".db" ) } );
+            running << p;
+        }
+        for ( int i = 0; i < running.size(); ++i )
+        {
+            running.at( i )->waitForFinished( 9000 );
+            const QStringList out = QString::fromUtf8( running.at( i )->readAllStandardOutput() ).trimmed().split( ' ' );
+            if ( running.at( i )->exitCode() == 0 && out.size() == 2 && out.at( 0 ) == QLatin1String( "200" ) )
+            {
+                timed.append( { out.at( 1 ).toDouble(), batch.at( i ) } );
+            }
+            running.at( i )->kill();
+            delete running.at( i );
+        }
+    }
+    if ( timed.isEmpty() )
+    {
+        cWarning() << "No server in" << path << "answered; leaving it as it is";
+        return;
+    }
+    std::sort( timed.begin(), timed.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+
+    if ( !QFileInfo::exists( path + QStringLiteral( ".claudeinstall-orig" ) ) )
+    {
+        QFile::copy( path, path + QStringLiteral( ".claudeinstall-orig" ) );
+    }
+    QFile out( path );
+    if ( !out.open( QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text ) )
+    {
+        return;
+    }
+    QTextStream ts( &out );
+    ts << "# Ranked by ClaudeInstall: fastest first\n";
+    for ( int i = 0; i < timed.size() && i < m_mirrorKeep; ++i )
+    {
+        ts << "Server = " << timed.at( i ).second << '\n';
+    }
+    cDebug() << "Fastest server for" << repo << ":" << timed.first().second << "in" << timed.first().first << "s";
 }
 
 QString
@@ -712,6 +831,7 @@ DistroProfileJob::resolvePackages( QStringList& packages )
 JobResult
 DistroProfileJob::bootstrap( const QString& root, QStringList packages )
 {
+    rankMirrors();
     refreshHostPackageLists();
     loadRenameTable();
     {
@@ -731,7 +851,7 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
         const QStringList cmd = QStringList { "pacstrap", "-K", root } + packages;
         setStatus( tr( "Installing %1 packages with pacstrap (attempt %2)", "@status" ).arg( packages.size() ).arg( attempt + 1 ) );
         QString out;
-        const int code = runStreaming( cmd, out );
+        const int code = runStreaming( cmd, out, m_stallSeconds );
         if ( code == 0 )
         {
             break;
@@ -762,10 +882,11 @@ DistroProfileJob::bootstrap( const QString& root, QStringList packages )
             return JobResult::error( tr( "Setup step failed" ),
                                      tr( "The command <pre>%1</pre> returned error code %2." ).arg( cmd.join( ' ' ) ).arg( code ) );
         }
-        setStatus( tr( "pacstrap failed; refreshing the package lists and retrying", "@status" ) );
-        cWarning() << "pacstrap failed; refreshing the package lists and retrying";
+        setStatus( tr( "pacstrap failed or stalled; choosing the fastest server again and retrying", "@status" ) );
+        cWarning() << "pacstrap failed or stalled; choosing the fastest server again and retrying";
+        rankMirrors();
         refreshHostPackageLists();
-        QThread::sleep( 3 );
+        QThread::sleep( 1 );
     }
 
     if ( !QFileInfo::exists( root + "/usr/bin/bash" ) )
@@ -1230,7 +1351,10 @@ DistroProfileJob::setConfigurationMap( const QVariantMap& configurationMap )
     m_assetsSha256 = ClaudeInstall::getString( configurationMap, "assetsSha256" ).toLower();
     m_regdomKey = ClaudeInstall::getString( configurationMap, "regdomKey", QStringLiteral( "packagechooser_regdom" ) );
     m_regdom = ClaudeInstall::getString( configurationMap, "wirelessRegdom" );
-    m_retries = ClaudeInstall::getInteger( configurationMap, "retries", 3 );
+    m_retries = ClaudeInstall::getInteger( configurationMap, "retries", 5 );
+    m_rankMirrors = ClaudeInstall::getBool( configurationMap, "rankMirrors", true );
+    m_mirrorKeep = qMax( 1, int( ClaudeInstall::getInteger( configurationMap, "mirrorKeep", 10 ) ) );
+    m_stallSeconds = int( ClaudeInstall::getInteger( configurationMap, "stallSeconds", 60 ) );
     m_unresolvedIsFatal = ClaudeInstall::getString( configurationMap, "unresolvedPackages", QStringLiteral( "fail" ) ) != QLatin1String( "warn" );
 }
 
