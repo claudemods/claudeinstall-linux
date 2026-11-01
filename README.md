@@ -2,6 +2,8 @@
      SPDX-License-Identifier: CC0-1.0
 -->
 
+*project merged into claude codex newer updates will be in the new project*
+
 <p align="center">
 <img src="https://i.postimg.cc/JhMRf2RZ/claudemods-03-17-2025.gif">
 
