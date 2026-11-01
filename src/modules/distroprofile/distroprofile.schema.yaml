@@ -9,8 +9,14 @@ properties:
     profilesDir: { type: string }
     assetsDir: { type: string }
     profileKey: { type: string }
-    phase: { type: string, enum: [ install, customize ] }
+    phase: { type: string, enum: [ install, customize, finalize ] }
     retries: { type: integer, minimum: 0 }
+    rankMirrors: { type: boolean }
+    archMirrorStatus: { type: boolean }
+    mirrorSpeedTests: { type: integer, minimum: 1 }
+    mirrorKeep: { type: integer, minimum: 1 }
+    stallSeconds: { type: integer, minimum: 0 }
+    stallMinKiBps: { type: integer, minimum: 0 }
     assetsUrl: { type: string }
     assetsSha256: { type: string }
     regdomKey: { type: string }

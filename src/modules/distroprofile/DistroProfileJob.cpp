@@ -100,14 +100,178 @@ quietInTarget( const QString& root, const QStringList& args, const QString& stdI
     return process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
 }
 
+/// Runs @p args in the target as @p uid / @p gid, without PAM (chroot --userspec), with a clean login environment
+int
+asUserInTarget( const QString& root, const QString& uid, const QString& gid, const QString& user, const QString& home,
+                const QString& shell, const QStringList& args )
+{
+    QProcess process;
+    process.setProgram( QStringLiteral( "chroot" ) );
+    process.setArguments( QStringList { QStringLiteral( "--userspec=%1:%2" ).arg( uid, gid ), root, "/usr/bin/env", "-i",
+                                        "HOME=" + home, "USER=" + user, "LOGNAME=" + user, "SHELL=" + shell,
+                                        "PATH=/usr/local/bin:/usr/bin:/bin", "TERM=dumb" }
+                          + args );
+    process.setProcessChannelMode( QProcess::MergedChannels );
+    process.start();
+    if ( !process.waitForStarted() )
+    {
+        return -1;
+    }
+    process.closeWriteChannel();
+    if ( !process.waitForFinished( 60000 ) )
+    {
+        process.kill();
+        return -1;
+    }
+    return process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
+}
+
+/// The enabled display manager (from display-manager.service), or empty
+QString
+displayManager( const QString& root )
+{
+    const QFileInfo link( root + QStringLiteral( "/etc/systemd/system/display-manager.service" ) );
+    if ( !link.isSymLink() )
+    {
+        return QString();
+    }
+    QString name = QFileInfo( link.symLinkTarget() ).fileName();
+    name.chop( name.endsWith( QLatin1String( ".service" ) ) ? 8 : 0 );
+    return name;
+}
+
+/// Logs @p user in through the new system's own PAM stack (service @p service), the way its login
+/// screen does. Empty when the login works; PAM's reason otherwise. @p ran is false when the
+/// helper is not installed.
+QString
+pamLogin( const QString& root, const QString& service, const QString& user, const QString& password, bool& ran )
+{
+#ifndef LOGINCHECK_PATH
+#define LOGINCHECK_PATH "/usr/lib/claudeinstall/claudeinstall-logincheck"
+#endif
+    ran = false;
+    const QString helper = QStringLiteral( LOGINCHECK_PATH );
+    if ( !QFileInfo( helper ).isExecutable() )
+    {
+        return QString();
+    }
+    const QString copy = QStringLiteral( "/tmp/claudeinstall-logincheck" );
+    QDir().mkpath( root + QStringLiteral( "/tmp" ) );
+    QFile::remove( root + copy );
+    if ( !QFile::copy( helper, root + copy ) )
+    {
+        return QString();
+    }
+    QFile::setPermissions( root + copy, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner );
+    QString output;
+    const int code = quietInTarget( root, { copy, service, user }, password + QLatin1Char( '\n' ), &output );
+    QFile::remove( root + copy );
+    ran = true;
+    if ( code == 0 )
+    {
+        return QString();
+    }
+    output = output.trimmed().replace( QLatin1Char( '\n' ), QStringLiteral( "; " ) );
+    return output.isEmpty() ? QStringLiteral( "PAM login failed (exit code %1)" ).arg( code ) : output;
+}
+
+/// What stops the login screen from starting a desktop: no display manager, or no session whose program is installed
+QStringList
+desktopProblems( const QString& root, const QString& dm )
+{
+    if ( dm.isEmpty() )
+    {
+        // some profiles have no login screen on purpose (DM: ""): the console login was tested through PAM "login"
+        cWarning() << "No display manager is enabled: the user logs in on the console";
+        return {};
+    }
+    static const QRegularExpression space( QStringLiteral( "\\s+" ) );
+    QStringList good, broken;
+    for ( const char* dir : { "/usr/share/wayland-sessions", "/usr/share/xsessions" } )
+    {
+        const QDir d( root + QLatin1String( dir ) );
+        for ( const QString& name : d.entryList( { QStringLiteral( "*.desktop" ) }, QDir::Files ) )
+        {
+            QFile f( d.filePath( name ) );
+            if ( !f.open( QIODevice::ReadOnly | QIODevice::Text ) )
+            {
+                continue;
+            }
+            QString exec;
+            while ( !f.atEnd() && exec.isEmpty() )
+            {
+                const QString line = QString::fromUtf8( f.readLine() ).trimmed();
+                if ( line.startsWith( QLatin1String( "Exec=" ) ) )
+                {
+                    exec = line.mid( 5 );
+                }
+            }
+            // the program and every absolute path it is handed (wrappers such as plasma-dbus-run-session-if-needed)
+            QStringList missing;
+            const QStringList words = exec.split( space, Qt::SkipEmptyParts );
+            for ( int i = 0; i < words.size(); ++i )
+            {
+                QString w = words.at( i );
+                w.remove( QLatin1Char( '"' ) );
+                if ( i > 0 && !w.startsWith( QLatin1Char( '/' ) ) )
+                {
+                    continue;
+                }
+                const QString path = w.startsWith( QLatin1Char( '/' ) ) ? root + w : root + QStringLiteral( "/usr/bin/" ) + w;
+                if ( !QFileInfo( path ).isExecutable() )
+                {
+                    missing << w;
+                }
+            }
+            if ( exec.isEmpty() || !missing.isEmpty() )
+            {
+                broken << QStringLiteral( "%1 (%2 missing)" ).arg( name, missing.isEmpty() ? QStringLiteral( "Exec" ) : missing.join( ", " ) );
+            }
+            else
+            {
+                good << name;
+            }
+        }
+    }
+    if ( good.isEmpty() )
+    {
+        return { broken.isEmpty() ? QStringLiteral( "no desktop session is installed (wayland-sessions / xsessions are empty)" )
+                                  : QStringLiteral( "no desktop session can start: %1" ).arg( broken.join( "; " ) ) };
+    }
+    if ( !broken.isEmpty() )
+    {
+        cWarning() << "Desktop sessions that cannot start:" << broken;
+    }
+    return {};
+}
+
 /// What would stop @p user from logging in with @p password on the new system; empty when all is well.
-/// The password is checked against the hash in the target's /etc/shadow; the account must not be
-/// locked, its shell must be usable, and the home directory must belong to the user and be writable by it.
+/// A real login through the new system's PAM stack (the display manager's service), the login shell
+/// started as the user, the home directory, and a desktop session the login screen can start.
 QStringList
 verifyUserAccount( const QString& root, const QString& user, const QString& password, const QString& home )
 {
     QStringList problems;
 
+    // 1. The real login: the new system's PAM decides (password, lock, expiry, forced change, faillock)
+    const QString dm = displayManager( root );
+    const QString service = !dm.isEmpty() && QFileInfo::exists( root + QStringLiteral( "/etc/pam.d/" ) + dm ) ? dm : QStringLiteral( "login" );
+    bool pamRan = false;
+    const QString pam = pamLogin( root, service, user, password, pamRan );
+    if ( !pam.isEmpty() )
+    {
+        problems << QStringLiteral( "login through PAM service \"%1\" fails: %2" ).arg( service, pam );
+    }
+    if ( !pamRan )
+    {
+        cWarning() << "claudeinstall-logincheck is not installed: the login is checked against /etc/shadow only";
+    }
+    else
+    {
+        cDebug() << "Login test through PAM service" << service << ( pam.isEmpty() ? "passed" : "failed" );
+    }
+
+    // 2. The password against the hash, so the report says which part is wrong
     QString shadow;
     if ( quietInTarget( root, { "getent", "shadow", user }, QString(), &shadow ) != 0 )
     {
@@ -129,12 +293,19 @@ verifyUserAccount( const QString& root, const QString& user, const QString& pass
         }
     }
 
-    QString shell;
-    quietInTarget( root, { "getent", "passwd", user }, QString(), &shell );
-    const QString shellPath = shell.trimmed().section( ':', 6, 6 );
-    if ( shellPath.isEmpty() || !QFileInfo::exists( root + shellPath ) || shellPath.endsWith( QLatin1String( "nologin" ) ) )
+    QString passwd;
+    quietInTarget( root, { "getent", "passwd", user }, QString(), &passwd );
+    const QStringList entry = passwd.trimmed().split( ':' );
+    const QString uid = entry.value( 2 ), gid = entry.value( 3 ), shellPath = entry.value( 6 );
+    if ( shellPath.isEmpty() || !QFileInfo( root + shellPath ).isExecutable() || shellPath.endsWith( QLatin1String( "nologin" ) )
+         || shellPath.endsWith( QLatin1String( "/false" ) ) )
     {
         problems << QStringLiteral( "login shell %1 is not usable" ).arg( shellPath );
+    }
+    else if ( asUserInTarget( root, uid, gid, user, home, shellPath, { shellPath, "-l", "-c", "true" } ) != 0 )
+    {
+        // the desktop session is started through the login shell: if it cannot start, the login screen comes straight back
+        problems << QStringLiteral( "the login shell %1 does not start for the user" ).arg( shellPath );
     }
 
     QString owner;
@@ -149,11 +320,25 @@ verifyUserAccount( const QString& root, const QString& user, const QString& pass
     {
         problems << QStringLiteral( "%1 is owned by root" ).arg( rootOwned.trimmed() );
     }
-    if ( quietInTarget( root, { "runuser", "-u", user, "--", "test", "-w", home } ) != 0 )
+    if ( asUserInTarget( root, uid, gid, user, home, shellPath, { "/usr/bin/test", "-w", home } ) != 0 )
     {
         problems << QStringLiteral( "the user cannot write to the home directory" );
     }
+
+    // 3. Something for the login screen to start
+    problems += desktopProblems( root, dm );
     return problems;
+}
+
+/// Clears what blocks an account that has the right password: failed-login lock (faillock),
+/// a locked password, expiry and a forced password change
+void
+unblockAccount( const QString& root, const QString& user )
+{
+    quietInTarget( root, { "faillock", "--user", user, "--reset" } );
+    quietInTarget( root, { "usermod", "-U", user } );
+    quietInTarget( root, { "chage", "-E", "-1", "-I", "-1", "-m", "0", "-M", "99999", "-d",
+                           QDate::currentDate().toString( Qt::ISODate ), user } );
 }
 
 /// Last step before unmounting: delete the user inside the new system, create it again and
@@ -228,18 +413,26 @@ resetUserAccount( const QString& root, const QString& user, const QString& passw
     fixHome();
 
     // Check phase: log in to the new account the way the login screen will
+    unblockAccount( root, user );
     const QStringList problems = verifyUserAccount( root, user, password, home );
     if ( !problems.isEmpty() )
     {
+        cWarning() << "Login test failed:" << problems << "- repairing and testing again";
         // one repair attempt, then check again
         quietInTarget( root, setPassword );
+        unblockAccount( root, user );
         fixHome();
         const QStringList again = verifyUserAccount( root, user, password, home );
+        // the failed tries must not count against the user at the first real login
+        quietInTarget( root, { "faillock", "--user", user, "--reset" } );
         if ( !again.isEmpty() )
         {
-            return bad( QCoreApplication::translate( "DistroProfileJob", "Login check failed: %1" ).arg( again.join( QStringLiteral( "; " ) ) ) );
+            cWarning() << "Login test failed again:" << again;
+            return bad( QCoreApplication::translate( "DistroProfileJob", "The new system would not let %1 log in:\n%2" )
+                            .arg( user, again.join( QLatin1Char( '\n' ) ) ) );
         }
     }
+    cDebug() << "Login test passed for" << user;
     return JobResult::ok();
 }
 
