@@ -144,7 +144,7 @@ displayManager( const QString& root )
 /// screen does. Empty when the login works; PAM's reason otherwise. @p ran is false when the
 /// helper is not installed.
 QString
-pamLogin( const QString& root, const QString& service, const QString& user, const QString& password, bool& ran )
+pamLogin( const QString& root, const QString& service, const QString& user, const QString& password, bool& ran, bool authOnly = false )
 {
 #ifndef LOGINCHECK_PATH
 #define LOGINCHECK_PATH "/usr/lib/claudeinstall/claudeinstall-logincheck"
@@ -164,7 +164,12 @@ pamLogin( const QString& root, const QString& service, const QString& user, cons
     }
     QFile::setPermissions( root + copy, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner );
     QString output;
-    const int code = quietInTarget( root, { copy, service, user }, password + QLatin1Char( '\n' ), &output );
+    QStringList args { copy, service, user };
+    if ( authOnly )
+    {
+        args << QStringLiteral( "--auth-only" );
+    }
+    const int code = quietInTarget( root, args, password + QLatin1Char( '\n' ), &output );
     QFile::remove( root + copy );
     ran = true;
     if ( code == 0 )
@@ -173,6 +178,127 @@ pamLogin( const QString& root, const QString& service, const QString& user, cons
     }
     output = output.trimmed().replace( QLatin1Char( '\n' ), QStringLiteral( "; " ) );
     return output.isEmpty() ? QStringLiteral( "PAM login failed (exit code %1)" ).arg( code ) : output;
+}
+
+/// Tries every part of the login on its own through the new system's PAM, so the error says
+/// which one refuses: pam_unix (password), pam_shells, pam_nologin, pam_faillock, then the
+/// system-auth and system-login stacks. One line per part; @p failing gets the keys that fail.
+QStringList
+pamDiagnosis( const QString& root, const QString& user, const QString& password, QStringList& failing )
+{
+    struct Probe
+    {
+        const char* key;
+        const char* name;
+        const char* service;  ///< an existing service, or nullptr to write @p lines as a test service
+        const char* lines;
+    };
+    static const Probe probes[] = {
+        { "unix", "password (pam_unix)", nullptr, "auth required pam_unix.so\n" },
+        { "shells", "shell listed in /etc/shells (pam_shells)", nullptr, "auth required pam_shells.so\n" },
+        { "nologin", "no nologin file (pam_nologin)", nullptr, "auth required pam_nologin.so\n" },
+        { "faillock", "not locked out (pam_faillock)", nullptr, "auth required pam_faillock.so preauth\n" },
+        { "system-auth", "system-auth stack", "system-auth", nullptr },
+        { "system-login", "system-login stack", "system-login", nullptr },
+    };
+    const QString probeService = QStringLiteral( "claudeinstall-probe" );
+    const QString probeFile = root + QStringLiteral( "/etc/pam.d/" ) + probeService;
+    QStringList report;
+    for ( const Probe& p : probes )
+    {
+        QString service;
+        if ( p.service )
+        {
+            service = QLatin1String( p.service );
+            if ( !QFileInfo::exists( root + QStringLiteral( "/etc/pam.d/" ) + service ) )
+            {
+                report << QStringLiteral( "%1: not present" ).arg( QLatin1String( p.name ) );
+                continue;
+            }
+        }
+        else
+        {
+            QFile f( probeFile );
+            if ( !f.open( QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text ) )
+            {
+                continue;
+            }
+            f.write( QByteArray( "#%PAM-1.0\n" ) + p.lines );
+            f.close();
+            service = probeService;
+        }
+        bool ran = false;
+        const QString result = pamLogin( root, service, user, password, ran, true );
+        QFile::remove( probeFile );
+        if ( !ran )
+        {
+            return {};
+        }
+        report << ( result.isEmpty() ? QStringLiteral( "%1: OK" ).arg( QLatin1String( p.name ) )
+                                     : QStringLiteral( "%1: FAILS (%2)" ).arg( QLatin1String( p.name ), result ) );
+        if ( !result.isEmpty() )
+        {
+            failing << QLatin1String( p.key );
+        }
+    }
+    // pam_unix and the stacks are cleared of the test's failed tries
+    quietInTarget( root, { "faillock", "--user", user, "--reset" } );
+    return report;
+}
+
+/// A SHA-512 crypt hash of @p password made here on the live system: every libxcrypt and glibc reads it
+QString
+sha512Hash( const QString& password )
+{
+    char salt[ CRYPT_GENSALT_OUTPUT_SIZE ];
+    if ( !crypt_gensalt_rn( "$6$", 0, nullptr, 0, salt, int( sizeof( salt ) ) ) )
+    {
+        return QString();
+    }
+    auto data = std::make_unique< crypt_data >();
+    std::memset( data.get(), 0, sizeof( crypt_data ) );
+    const char* hash = crypt_r( password.toUtf8().constData(), salt, data.get() );
+    return ( hash && hash[ 0 ] == '$' ) ? QString::fromLatin1( hash ) : QString();
+}
+
+/// The shells listed in the target's /etc/shells
+QStringList
+listedShells( const QString& root )
+{
+    QFile f( root + QStringLiteral( "/etc/shells" ) );
+    QStringList shells;
+    if ( f.open( QIODevice::ReadOnly | QIODevice::Text ) )
+    {
+        for ( const QString& raw : QString::fromUtf8( f.readAll() ).split( QLatin1Char( '\n' ) ) )
+        {
+            const QString line = raw.trimmed();
+            if ( !line.isEmpty() && !line.startsWith( QLatin1Char( '#' ) ) )
+            {
+                shells << line;
+            }
+        }
+    }
+    return shells;
+}
+
+/// What Arch's system-login PAM stack refuses even with the right password:
+/// pam_shells (the shell must be listed in /etc/shells exactly) and pam_nologin
+QStringList
+loginStackProblems( const QString& root, const QString& shellPath )
+{
+    QStringList problems;
+    if ( !shellPath.isEmpty() && !listedShells( root ).contains( shellPath ) )
+    {
+        problems << QStringLiteral( "the login shell %1 is not listed in /etc/shells, so pam_shells refuses the login" ).arg( shellPath );
+    }
+    for ( const char* file : { "/etc/nologin", "/run/nologin", "/var/run/nologin" } )
+    {
+        if ( QFileInfo::exists( root + QLatin1String( file ) ) )
+        {
+            problems << QStringLiteral( "%1 exists, so pam_nologin refuses every login but root's" ).arg( QLatin1String( file ) );
+        }
+    }
+    return problems;
 }
 
 /// What stops the login screen from starting a desktop: no display manager, or no session whose program is installed
@@ -307,6 +433,7 @@ verifyUserAccount( const QString& root, const QString& user, const QString& pass
         // the desktop session is started through the login shell: if it cannot start, the login screen comes straight back
         problems << QStringLiteral( "the login shell %1 does not start for the user" ).arg( shellPath );
     }
+    problems += loginStackProblems( root, shellPath );
 
     QString owner;
     quietInTarget( root, { "stat", "-c", "%U", home }, QString(), &owner );
@@ -330,11 +457,51 @@ verifyUserAccount( const QString& root, const QString& user, const QString& pass
     return problems;
 }
 
-/// Clears what blocks an account that has the right password: failed-login lock (faillock),
-/// a locked password, expiry and a forced password change
+/// Clears what blocks an account that has the right password: a login shell pam_shells does not
+/// accept, nologin files, failed-login lock (faillock), a locked password, expiry and a forced password change
 void
 unblockAccount( const QString& root, const QString& user )
 {
+    QString passwd;
+    quietInTarget( root, { "getent", "passwd", user }, QString(), &passwd );
+    const QString shell = passwd.trimmed().section( ':', 6, 6 );
+    const QStringList shells = listedShells( root );
+    if ( !shell.isEmpty() && !shells.contains( shell ) )
+    {
+        // The same program under the name /etc/shells uses (/usr/sbin/fish -> /usr/bin/fish), else list it,
+        // else (the shell is not installed at all) bash
+        QString use;
+        for ( const QString& s : shells )
+        {
+            if ( QFileInfo( s ).fileName() == QFileInfo( shell ).fileName() && QFileInfo( root + s ).isExecutable() )
+            {
+                use = s;
+                break;
+            }
+        }
+        if ( use.isEmpty() && QFileInfo( root + shell ).isExecutable() && !shell.endsWith( QLatin1String( "nologin" ) ) )
+        {
+            QFile f( root + QStringLiteral( "/etc/shells" ) );
+            if ( f.open( QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text ) )
+            {
+                f.write( ( shell + QLatin1Char( '\n' ) ).toUtf8() );
+            }
+            cWarning() << "Login shell" << shell << "was not in /etc/shells; added it";
+        }
+        else
+        {
+            if ( use.isEmpty() )
+            {
+                use = QStringLiteral( "/bin/bash" );
+            }
+            quietInTarget( root, { "usermod", "-s", use, user } );
+            cWarning() << "Login shell" << shell << "is not accepted by pam_shells; changed to" << use;
+        }
+    }
+    for ( const char* file : { "/etc/nologin", "/run/nologin", "/var/run/nologin" } )
+    {
+        QFile::remove( root + QLatin1String( file ) );
+    }
     quietInTarget( root, { "faillock", "--user", user, "--reset" } );
     quietInTarget( root, { "usermod", "-U", user } );
     quietInTarget( root, { "chage", "-E", "-1", "-I", "-1", "-m", "0", "-M", "99999", "-d",
@@ -417,20 +584,84 @@ resetUserAccount( const QString& root, const QString& user, const QString& passw
     const QStringList problems = verifyUserAccount( root, user, password, home );
     if ( !problems.isEmpty() )
     {
-        cWarning() << "Login test failed:" << problems << "- repairing and testing again";
-        // one repair attempt, then check again
+        cWarning() << "Login test failed:" << problems << "- testing every part of the login, repairing, testing again";
+        // Find the part of the login that refuses, then repair it
+        QStringList failing;
+        const QStringList before = pamDiagnosis( root, user, password, failing );
+        cWarning() << "Login parts:" << before;
+
+        // Every part passes on its own but the login screen's service refuses: its PAM file is broken
+        const QString sddmPam = root + QStringLiteral( "/etc/pam.d/sddm" );
+        if ( !before.isEmpty() && failing.isEmpty() && displayManager( root ) == QLatin1String( "sddm" ) )
+        {
+            QFile::remove( sddmPam + QStringLiteral( ".claudeinstall-orig" ) );
+            QFile::copy( sddmPam, sddmPam + QStringLiteral( ".claudeinstall-orig" ) );
+            QFile f( sddmPam );
+            if ( f.open( QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text ) )
+            {
+                // Arch's own sddm PAM file
+                f.write( "#%PAM-1.0\n\n"
+                         "auth        include     system-login\n"
+                         "-auth       optional    pam_gnome_keyring.so\n"
+                         "-auth       optional    pam_kwallet5.so\n\n"
+                         "account     include     system-login\n\n"
+                         "password    include     system-login\n"
+                         "-password   optional    pam_gnome_keyring.so use_authtok\n\n"
+                         "session     optional    pam_keyinit.so force revoke\n"
+                         "session     include     system-login\n"
+                         "-session    optional    pam_gnome_keyring.so auto_start\n"
+                         "-session    optional    pam_kwallet5.so auto_start\n" );
+            }
+            cWarning() << "/etc/pam.d/sddm refused a login that every part allows; replaced with Arch's (old one kept as .claudeinstall-orig)";
+        }
+
         quietInTarget( root, setPassword );
+        if ( failing.contains( QStringLiteral( "unix" ) ) )
+        {
+            // the new system's pam_unix does not accept the hash chpasswd made: store a SHA-512 one made here
+            const QString hash = sha512Hash( password );
+            if ( !hash.isEmpty() )
+            {
+                quietInTarget( root, { "usermod", "-p", hash, user } );
+            }
+        }
         unblockAccount( root, user );
+        if ( failing.contains( QStringLiteral( "shells" ) ) )
+        {
+            // still not accepted: bash, listed in /etc/shells
+            if ( !listedShells( root ).contains( QStringLiteral( "/bin/bash" ) ) )
+            {
+                QFile f( root + QStringLiteral( "/etc/shells" ) );
+                if ( f.open( QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text ) )
+                {
+                    f.write( "/bin/bash\n" );
+                }
+            }
+            quietInTarget( root, { "usermod", "-s", "/bin/bash", user } );
+        }
         fixHome();
         const QStringList again = verifyUserAccount( root, user, password, home );
         // the failed tries must not count against the user at the first real login
         quietInTarget( root, { "faillock", "--user", user, "--reset" } );
         if ( !again.isEmpty() )
         {
-            cWarning() << "Login test failed again:" << again;
-            return bad( QCoreApplication::translate( "DistroProfileJob", "The new system would not let %1 log in:\n%2" )
-                            .arg( user, again.join( QLatin1Char( '\n' ) ) ) );
+            // The error dialog itself says which part refuses, before and after the repair
+            QStringList after;
+            const QStringList now = pamDiagnosis( root, user, password, after );
+            QString entry;
+            quietInTarget( root, { "getent", "passwd", user }, QString(), &entry );
+            return bad( QCoreApplication::translate( "DistroProfileJob",
+                                                     "The new system would not let %1 log in:\n%2\n\n"
+                                                     "Each part of the login tested on its own (after repairing):\n%3\n\n"
+                                                     "Before repairing:\n%4\n\nAccount: %5" )
+                            .arg( user,
+                                  again.join( QLatin1Char( '\n' ) ),
+                                  now.isEmpty() ? QStringLiteral( "(test helper missing)" ) : now.join( QLatin1Char( '\n' ) ),
+                                  before.isEmpty() ? QStringLiteral( "(test helper missing)" ) : before.join( QLatin1Char( '\n' ) ),
+                                  entry.trimmed().section( ':', 0, 0 ) + QStringLiteral( ", shell " )
+                                      + entry.trimmed().section( ':', 6, 6 ) ) );
         }
+        cDebug() << "Login repaired; parts before the repair:" << before;
     }
     cDebug() << "Login test passed for" << user;
     return JobResult::ok();

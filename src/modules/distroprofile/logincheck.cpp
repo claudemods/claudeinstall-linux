@@ -70,9 +70,11 @@ conversation( int count, const struct pam_message** messages, struct pam_respons
 int
 main( int argc, char** argv )
 {
-    if ( argc != 3 )
+    // --auth-only: test only the "auth" lines (used to try one PAM module at a time)
+    const bool authOnly = argc == 4 && std::strcmp( argv[ 3 ], "--auth-only" ) == 0;
+    if ( argc != 3 && !authOnly )
     {
-        std::fprintf( stderr, "usage: %s SERVICE USER < password\n", argv[ 0 ] );
+        std::fprintf( stderr, "usage: %s SERVICE USER [--auth-only] < password\n", argv[ 0 ] );
         return 2;
     }
     std::getline( std::cin, g_password );
@@ -89,7 +91,7 @@ main( int argc, char** argv )
 
     const char* stage = "authentication";
     rc = pam_authenticate( handle, 0 );
-    if ( rc == PAM_SUCCESS )
+    if ( rc == PAM_SUCCESS && !authOnly )
     {
         stage = "account";
         rc = pam_acct_mgmt( handle, 0 );
