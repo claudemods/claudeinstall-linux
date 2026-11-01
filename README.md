@@ -20,8 +20,8 @@
   <a href="https://www.gentoo.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Gentoo-54487A?style=for-the-badge&logo=gentoo" /></a>
   <a href="https://voidlinux.org" target="_blank"><img src="https://img.shields.io/badge/DISTRO-Void-478061?style=for-the-badge&logo=void-linux" /></a>
 
-<span style="color: gray;">your text</span>
-project merged into claude codex newer updates will be in the new project
+<span style="color: gray;">project merged into claude codex newer updates will be in the new project</span>
+
 
 </div>
 
